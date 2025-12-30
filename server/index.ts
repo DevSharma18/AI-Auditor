@@ -2,9 +2,42 @@ import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
+import { spawn } from "child_process";
 
 const app = express();
 const httpServer = createServer(app);
+
+function startPythonBackend() {
+  console.log("Starting Python backend on port 8000...");
+  const python = spawn("python", ["-m", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"], {
+    cwd: process.cwd(),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  python.stdout.on("data", (data: Buffer) => {
+    console.log(`[python] ${data.toString().trim()}`);
+  });
+
+  python.stderr.on("data", (data: Buffer) => {
+    console.log(`[python] ${data.toString().trim()}`);
+  });
+
+  python.on("close", (code: number | null) => {
+    console.log(`Python backend exited with code ${code}`);
+    if (code !== 0) {
+      console.log("Restarting Python backend in 5 seconds...");
+      setTimeout(startPythonBackend, 5000);
+    }
+  });
+
+  python.on("error", (err: Error) => {
+    console.error("Failed to start Python backend:", err);
+  });
+
+  return python;
+}
+
+startPythonBackend();
 
 declare module "http" {
   interface IncomingMessage {
