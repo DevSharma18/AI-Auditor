@@ -6,10 +6,31 @@ A comprehensive monitoring and auditing platform for AI models. The application 
 
 AI Auditor provides enterprise-grade tools for:
 - **Dashboard**: Main overview with metrics cards and trend charts for PII, Drift, Bias, and Hallucination monitoring
-- **Model Manager**: Manage custom AI models with full CRUD operations and view 32 pre-configured system models
+- **Model Manager**: Manage custom AI models with full CRUD operations
 - **Audits**: Both Model Auditing (active testing) and Log Auditing (passive analysis) with configurable categories
 - **Analytics Pages**: Detailed views for Drift, Bias, Hallucination, PII, and Compliance monitoring
 - **Settings**: Configure notifications, audit thresholds, and model integrations
+
+## Evidence-Driven Architecture (v2.0)
+
+The system is now **evidence-driven and real-time**. Key design principles:
+
+1. **No Demo Data**: All seed data and random generators have been removed
+2. **Real Evidence Only**: Metrics are computed only from actual evidence sources
+3. **Explicit Baselines**: Baseline metrics stored in `metrics_snapshot` field, never fabricated
+4. **Nullable Scores**: drift_score, bias_score, risk_score are nullable - only populated when real data exists
+5. **Empty State Handling**: Dashboard shows appropriate status messages when no data available
+
+### Audit Results
+- `AUDIT_PASS`: All metrics within thresholds
+- `AUDIT_WARN`: Some metrics exceed warning thresholds
+- `AUDIT_FAIL`: Critical findings detected
+- `BASELINE_CREATED`: First audit with real data, establishes baseline
+- `NO_EVIDENCE`: No evidence sources configured or no data found
+
+### Finding Severities
+- `INFO`: System messages (e.g., "No evidence sources configured")
+- `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`: Issue severity levels
 
 ## Project Architecture
 
@@ -30,21 +51,21 @@ AI Auditor provides enterprise-grade tools for:
 - **Framework**: FastAPI with uvicorn
 - **Database**: SQLite with SQLAlchemy ORM
 - **Scheduler**: APScheduler for automated audits (hourly checks, daily/weekly/monthly execution)
-- **Audit Engine**: Real audit logic with passive (baseline comparison) and active (security rules) audits
+- **Audit Engine**: Evidence-driven with passive (baseline comparison) and active (security rules) audits
 - **API Endpoints**:
   - `GET/POST /api/models` - AI model management
-  - `GET/PATCH/DELETE /api/models/:id` - Single model operations
+  - `DELETE /api/models/:id` - Delete model
   - `GET /api/audits` - Audit history with filtering
   - `POST /api/audits/trigger/:model_id` - Manual audit trigger
   - `GET /api/findings` - Audit findings with severity filtering
-  - `GET /api/dashboard/overview` - Dashboard metrics summary
+  - `GET /api/dashboard/overview` - Dashboard metrics summary with empty state handling
 
 ### Database Models
 - **AIModel**: AI model definitions with connection type and audit frequency
-- **EvidenceSource**: Data sources for each model
+- **EvidenceSource**: Data sources for each model (with last_data_snapshot for caching)
 - **AuditPolicy**: Audit thresholds and configuration
 - **AuditRun**: Individual audit execution records
-- **AuditSummary**: Aggregated audit results per model
+- **AuditSummary**: Aggregated results with metrics_snapshot for baseline storage
 - **AuditFinding**: Specific issues found during audits
 
 ## Key Files
@@ -62,9 +83,8 @@ AI Auditor provides enterprise-grade tools for:
 - `backend/main.py` - FastAPI application entry point
 - `backend/models.py` - SQLAlchemy ORM models
 - `backend/routes.py` - Python API endpoints
-- `backend/audit_engine.py` - Passive and active audit logic
+- `backend/audit_engine.py` - Evidence-driven passive and active audit logic
 - `backend/scheduler.py` - APScheduler configuration
-- `backend/seed_data.py` - Initial seed data for models
 
 ## Design System
 
@@ -82,3 +102,12 @@ AI Auditor provides enterprise-grade tools for:
 ## Running the Project
 
 The application runs on port 5000 using `npm run dev` which starts both the Express backend and Vite frontend.
+
+## Recent Changes (December 2025)
+
+- Removed all seed data and demo model generation
+- Rewrote audit engine to be evidence-driven
+- Added NO_EVIDENCE audit result type
+- Made all metric scores nullable
+- Added proper empty state handling in dashboard endpoints
+- Scheduler no longer runs audits on startup
