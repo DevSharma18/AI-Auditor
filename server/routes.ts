@@ -1,5 +1,5 @@
 import type { Express } from "express";
-import { createServer, type Server } from "http";
+import { type Server } from "http";
 import { createProxyMiddleware } from "http-proxy-middleware";
 
 export async function registerRoutes(
@@ -7,19 +7,25 @@ export async function registerRoutes(
   app: Express
 ): Promise<Server> {
   
-  app.use('/api', createProxyMiddleware({
-    target: 'http://localhost:8000',
+  const apiProxy = createProxyMiddleware({
+    target: 'http://127.0.0.1:8000',
     changeOrigin: true,
-    pathRewrite: {
-      '^/api': '/api'
-    },
+    ws: false,
+    proxyTimeout: 10000,
+    timeout: 10000,
     onError: (err, req, res) => {
-      console.error('Proxy error:', err);
-      if (res && 'status' in res) {
-        (res as any).status(502).json({ error: 'Backend unavailable' });
+      console.error('Proxy error:', err.message);
+      if (res && !res.headersSent) {
+        res.writeHead(502, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Backend unavailable', details: err.message }));
       }
+    },
+    onProxyReq: (proxyReq, req) => {
+      console.log(`Proxying: ${req.method} ${req.url} -> http://127.0.0.1:8000${req.url}`);
     }
-  }));
+  });
+
+  app.use('/api', apiProxy);
 
   return httpServer;
 }
