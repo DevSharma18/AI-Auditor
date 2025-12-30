@@ -21,18 +21,31 @@ AI Auditor provides enterprise-grade tools for:
 - **Styling**: Tailwind CSS with dark/light theme support
 - **Charts**: Recharts (PieChart, BarChart with time range selection)
 
-### Backend (`server/`)
+### Node.js Proxy (`server/`)
 - **Framework**: Express.js
-- **Storage**: In-memory storage (MemStorage)
-- **API Endpoints**:
-  - `GET/POST /api/models` - Custom model management
-  - `GET/PATCH/DELETE /api/models/:id` - Single model operations
-  - `GET/POST /api/audits` - Audit management
-  - `GET/PATCH /api/audits/:id` - Single audit operations
-  - `GET /api/metrics` - Dashboard metrics
+- **Function**: Proxies `/api` requests to Python backend on port 8000
+- **Features**: Spawns Python backend as child process with auto-restart
 
-### Shared (`shared/`)
-- `schema.ts` - Drizzle schemas and TypeScript types for users, models, audits, and metrics
+### Python Backend (`backend/`)
+- **Framework**: FastAPI with uvicorn
+- **Database**: SQLite with SQLAlchemy ORM
+- **Scheduler**: APScheduler for automated audits (hourly checks, daily/weekly/monthly execution)
+- **Audit Engine**: Real audit logic with passive (baseline comparison) and active (security rules) audits
+- **API Endpoints**:
+  - `GET/POST /api/models` - AI model management
+  - `GET/PATCH/DELETE /api/models/:id` - Single model operations
+  - `GET /api/audits` - Audit history with filtering
+  - `POST /api/audits/trigger/:model_id` - Manual audit trigger
+  - `GET /api/findings` - Audit findings with severity filtering
+  - `GET /api/dashboard/overview` - Dashboard metrics summary
+
+### Database Models
+- **AIModel**: AI model definitions with connection type and audit frequency
+- **EvidenceSource**: Data sources for each model
+- **AuditPolicy**: Audit thresholds and configuration
+- **AuditRun**: Individual audit execution records
+- **AuditSummary**: Aggregated audit results per model
+- **AuditFinding**: Specific issues found during audits
 
 ## Key Files
 
@@ -46,6 +59,12 @@ AI Auditor provides enterprise-grade tools for:
 - `client/src/pages/analytics/*.tsx` - Drift, Bias, Hallucination, PII, Compliance pages
 - `server/routes.ts` - API endpoints
 - `server/storage.ts` - In-memory storage implementation
+- `backend/main.py` - FastAPI application entry point
+- `backend/models.py` - SQLAlchemy ORM models
+- `backend/routes.py` - Python API endpoints
+- `backend/audit_engine.py` - Passive and active audit logic
+- `backend/scheduler.py` - APScheduler configuration
+- `backend/seed_data.py` - Initial seed data for models
 
 ## Design System
 
