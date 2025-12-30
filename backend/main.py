@@ -9,7 +9,10 @@ from backend.scheduler import start_scheduler, stop_scheduler
 app = FastAPI(
     title="AI Auditor API",
     description="Backend API for AI Model Auditing Platform - Real-Time Evidence-Driven",
-    version="2.0.0"
+    version="2.0.0",
+    docs_url="/api/docs",
+    openapi_url="/api/openapi.json",
+    redoc_url=None
 )
 
 app.add_middleware(
@@ -34,14 +37,9 @@ async def shutdown_event():
     stop_scheduler()
 
 
-@app.get("/")
-def root():
-    return {"message": "AI Auditor API is running", "docs": "/docs"}
-
-
-@app.get("/health")
+@app.get("/api/health")
 def health_check():
-    return {"status": "healthy"}
+    return {"status": "ok"}
 
 
 if __name__ == "__main__":
