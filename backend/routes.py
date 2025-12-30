@@ -9,7 +9,7 @@ from backend.models import AIModel, EvidenceSource, AuditPolicy, AuditRun, Audit
 from backend.schemas import (
     ModelRegister, ModelResponse, AuditPolicyCreate, AuditPolicyResponse,
     AuditResponse, AuditSummaryResponse, FindingResponse,
-    DashboardOverview, ModelDashboard
+    DashboardOverview, ModelDashboard, DashboardMetrics, ModelMetrics
 )
 from backend.audit_engine import AuditEngine
 
@@ -273,108 +273,175 @@ def get_audit_findings(audit_id: str, db: Session = Depends(get_db)):
 
 @router.get("/dashboard/overview", response_model=DashboardOverview, tags=["Dashboard"])
 def get_dashboard_overview(db: Session = Depends(get_db)):
+    """
+    Dashboard overview with explicit NO_DATA states.
+    Metrics are computed ONLY from real audit data in database.
+    Returns null metrics when no audits exist or only NO_EVIDENCE audits.
+    """
     total_models = db.query(AIModel).count()
     total_audits = db.query(AuditRun).count()
     
+    # Rule: If no audits exist, return NO_DATA
     if total_audits == 0:
         return DashboardOverview(
-            total_models=total_models,
-            total_audits=0,
-            passed_audits=0,
-            failed_audits=0,
-            critical_findings_count=0,
-            high_findings_count=0,
-            overall_risk_score=None,
-            audit_status_distribution={
-                "AUDIT_PASS": 0,
-                "AUDIT_WARN": 0,
-                "AUDIT_FAIL": 0,
-                "BASELINE_CREATED": 0,
-                "NO_EVIDENCE": 0
-            },
-            drift_score_percentage=None,
-            has_data=False,
-            status_message="No audits executed yet" if total_models > 0 else "No models registered yet"
+            status="NO_DATA",
+            message="No audits have been executed yet",
+            metrics=None
         )
     
-    passed_audits = db.query(AuditRun).filter(AuditRun.audit_result == "AUDIT_PASS").count()
-    failed_audits = db.query(AuditRun).filter(AuditRun.audit_result == "AUDIT_FAIL").count()
-    
-    critical_findings = db.query(AuditFinding).filter(AuditFinding.severity == "CRITICAL").count()
-    high_findings = db.query(AuditFinding).filter(AuditFinding.severity == "HIGH").count()
-    
-    avg_risk = db.query(func.avg(AuditSummary.risk_score)).filter(AuditSummary.risk_score.isnot(None)).scalar()
-    avg_drift = db.query(func.avg(AuditSummary.drift_score)).filter(AuditSummary.drift_score.isnot(None)).scalar()
-    
+    # Count audits by result type
     pass_count = db.query(AuditRun).filter(AuditRun.audit_result == "AUDIT_PASS").count()
     warn_count = db.query(AuditRun).filter(AuditRun.audit_result == "AUDIT_WARN").count()
     fail_count = db.query(AuditRun).filter(AuditRun.audit_result == "AUDIT_FAIL").count()
     baseline_count = db.query(AuditRun).filter(AuditRun.audit_result == "BASELINE_CREATED").count()
     no_evidence_count = db.query(AuditRun).filter(AuditRun.audit_result == "NO_EVIDENCE").count()
     
-    has_real_audits = (pass_count + warn_count + fail_count) > 0
+    # Rule: If ALL audits are NO_EVIDENCE, return NO_DATA (no real metrics exist)
+    if no_evidence_count == total_audits:
+        return DashboardOverview(
+            status="NO_DATA",
+            message="No evidence found in any audit windows",
+            metrics=None
+        )
     
-    if not has_real_audits:
-        if baseline_count > 0:
-            status_message = "Baseline established, waiting for comparison audits"
-        elif no_evidence_count > 0:
-            status_message = "No evidence found in audit windows"
-        else:
-            status_message = "Audits pending"
-    else:
-        status_message = "Real-time metrics computed from audit data"
+    # Rule: If only baselines exist, return BASELINE_NOT_ESTABLISHED equivalent
+    has_comparison_audits = (pass_count + warn_count + fail_count) > 0
+    if not has_comparison_audits and baseline_count > 0:
+        return DashboardOverview(
+            status="BASELINE_NOT_ESTABLISHED",
+            message="Baseline has been created but no comparison audits exist yet",
+            metrics=None
+        )
+    
+    # Rule: Only compute metrics when real audit results exist
+    if not has_comparison_audits:
+        return DashboardOverview(
+            status="NO_DATA",
+            message="No completed audits with metrics",
+            metrics=None
+        )
+    
+    # Query-based metrics from database only (no fallbacks, no defaults)
+    passed_audits = pass_count
+    failed_audits = fail_count
+    
+    # Critical and high findings from database - excludes INFO severity
+    critical_findings = db.query(AuditFinding).filter(AuditFinding.severity == "CRITICAL").count()
+    high_findings = db.query(AuditFinding).filter(AuditFinding.severity == "HIGH").count()
+    
+    # Averages from real summaries only - NULL if no data
+    avg_risk = db.query(func.avg(AuditSummary.risk_score)).filter(AuditSummary.risk_score.isnot(None)).scalar()
+    avg_drift = db.query(func.avg(AuditSummary.drift_score)).filter(AuditSummary.drift_score.isnot(None)).scalar()
     
     return DashboardOverview(
-        total_models=total_models,
-        total_audits=total_audits,
-        passed_audits=passed_audits,
-        failed_audits=failed_audits,
-        critical_findings_count=critical_findings,
-        high_findings_count=high_findings,
-        overall_risk_score=round(avg_risk, 2) if avg_risk is not None else None,
-        audit_status_distribution={
-            "AUDIT_PASS": pass_count,
-            "AUDIT_WARN": warn_count,
-            "AUDIT_FAIL": fail_count,
-            "BASELINE_CREATED": baseline_count,
-            "NO_EVIDENCE": no_evidence_count
-        },
-        drift_score_percentage=round(avg_drift, 2) if avg_drift is not None else None,
-        has_data=has_real_audits,
-        status_message=status_message
+        status="OK",
+        message="Real-time metrics computed from audit data",
+        metrics=DashboardMetrics(
+            total_models=total_models,
+            total_audits=total_audits,
+            passed_audits=passed_audits,
+            failed_audits=failed_audits,
+            critical_findings_count=critical_findings,
+            high_findings_count=high_findings,
+            overall_risk_score=round(avg_risk, 2) if avg_risk is not None else None,
+            audit_status_distribution={
+                "AUDIT_PASS": pass_count,
+                "AUDIT_WARN": warn_count,
+                "AUDIT_FAIL": fail_count,
+                "BASELINE_CREATED": baseline_count,
+                "NO_EVIDENCE": no_evidence_count
+            },
+            drift_score_percentage=round(avg_drift, 2) if avg_drift is not None else None
+        )
     )
 
 
 @router.get("/dashboard/model/{model_id}", response_model=ModelDashboard, tags=["Dashboard"])
 def get_model_dashboard(model_id: str, db: Session = Depends(get_db)):
+    """
+    Model-specific dashboard with explicit NO_DATA states.
+    Metrics are computed ONLY from real audit data for this model.
+    Returns null metrics when no real audits exist.
+    """
     model = db.query(AIModel).filter(AIModel.model_id == model_id).first()
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
     
     total_audits = db.query(AuditRun).filter(AuditRun.model_id == model.id).count()
     
+    # Rule: If no audits exist, return NO_DATA
     if total_audits == 0:
         return ModelDashboard(
             model_id=model.model_id,
             model_name=model.name,
             model_version=model.version,
             connection_type=model.connection_type,
-            total_audits=0,
-            passed_audits=0,
-            failed_audits=0,
-            last_audit_status=None,
-            last_audit_time=None,
-            avg_drift_score=None,
-            avg_bias_score=None,
-            avg_risk_score=None,
-            recent_findings=[],
+            status="NO_DATA",
+            message="No audits have been executed yet",
             baseline_established=False,
-            status_message="No audits executed yet"
+            metrics=None
         )
     
+    # Count audit types for this model
+    no_evidence_count = db.query(AuditRun).filter(
+        AuditRun.model_id == model.id, 
+        AuditRun.audit_result == "NO_EVIDENCE"
+    ).count()
+    
+    # Rule: If ALL audits are NO_EVIDENCE, return NO_DATA
+    if no_evidence_count == total_audits:
+        return ModelDashboard(
+            model_id=model.model_id,
+            model_name=model.name,
+            model_version=model.version,
+            connection_type=model.connection_type,
+            status="NO_DATA",
+            message="No evidence found in any audit windows",
+            baseline_established=False,
+            metrics=None
+        )
+    
+    # Check for baseline
+    baseline_audit = db.query(AuditRun).filter(
+        AuditRun.model_id == model.id,
+        AuditRun.audit_result.in_(["BASELINE_CREATED", "AUDIT_PASS", "AUDIT_WARN"])
+    ).first()
+    baseline_established = baseline_audit is not None
+    
+    # Count comparison audits
     passed = db.query(AuditRun).filter(AuditRun.model_id == model.id, AuditRun.audit_result == "AUDIT_PASS").count()
+    warned = db.query(AuditRun).filter(AuditRun.model_id == model.id, AuditRun.audit_result == "AUDIT_WARN").count()
     failed = db.query(AuditRun).filter(AuditRun.model_id == model.id, AuditRun.audit_result == "AUDIT_FAIL").count()
     
+    has_comparison_audits = (passed + warned + failed) > 0
+    
+    # Rule: If only baselines exist without comparisons, return BASELINE_NOT_ESTABLISHED state
+    if not has_comparison_audits and baseline_established:
+        return ModelDashboard(
+            model_id=model.model_id,
+            model_name=model.name,
+            model_version=model.version,
+            connection_type=model.connection_type,
+            status="BASELINE_NOT_ESTABLISHED",
+            message="Baseline has been created but no comparison audits exist yet",
+            baseline_established=True,
+            metrics=None
+        )
+    
+    # Rule: No baseline at all
+    if not baseline_established:
+        return ModelDashboard(
+            model_id=model.model_id,
+            model_name=model.name,
+            model_version=model.version,
+            connection_type=model.connection_type,
+            status="BASELINE_NOT_ESTABLISHED",
+            message="Baseline not established",
+            baseline_established=False,
+            metrics=None
+        )
+    
+    # Query real metrics from database
     last_audit = (
         db.query(AuditRun)
         .filter(AuditRun.model_id == model.id)
@@ -389,6 +456,7 @@ def get_model_dashboard(model_id: str, db: Session = Depends(get_db)):
         .all()
     )
     
+    # Compute averages only from real data - NULL if no scores exist
     drift_scores = [s.drift_score for s in summaries if s.drift_score is not None]
     bias_scores = [s.bias_score for s in summaries if s.bias_score is not None]
     risk_scores = [s.risk_score for s in summaries if s.risk_score is not None]
@@ -397,44 +465,35 @@ def get_model_dashboard(model_id: str, db: Session = Depends(get_db)):
     avg_bias = sum(bias_scores) / len(bias_scores) if bias_scores else None
     avg_risk = sum(risk_scores) / len(risk_scores) if risk_scores else None
     
-    baseline_audit = db.query(AuditRun).filter(
-        AuditRun.model_id == model.id,
-        AuditRun.audit_result.in_(["BASELINE_CREATED", "AUDIT_PASS", "AUDIT_WARN"])
-    ).first()
-    baseline_established = baseline_audit is not None
-    
+    # Exclude INFO findings (system messages) from recent findings display
     recent_findings = (
         db.query(AuditFinding)
         .join(AuditRun)
-        .filter(AuditRun.model_id == model.id)
+        .filter(AuditRun.model_id == model.id, AuditFinding.severity != "INFO")
         .order_by(AuditFinding.id.desc())
         .limit(10)
         .all()
     )
-    
-    if not baseline_established:
-        status_message = "Baseline not established"
-    elif avg_drift is None and avg_bias is None and avg_risk is None:
-        status_message = "Awaiting comparison audits"
-    else:
-        status_message = "Real-time metrics computed from audit data"
     
     return ModelDashboard(
         model_id=model.model_id,
         model_name=model.name,
         model_version=model.version,
         connection_type=model.connection_type,
-        total_audits=total_audits,
-        passed_audits=passed,
-        failed_audits=failed,
-        last_audit_status=last_audit.audit_result if last_audit else None,
-        last_audit_time=last_audit.executed_at if last_audit else None,
-        avg_drift_score=round(avg_drift, 2) if avg_drift is not None else None,
-        avg_bias_score=round(avg_bias, 2) if avg_bias is not None else None,
-        avg_risk_score=round(avg_risk, 2) if avg_risk is not None else None,
-        recent_findings=[FindingResponse.model_validate(f) for f in recent_findings],
+        status="OK",
+        message="Real-time metrics computed from audit data",
         baseline_established=baseline_established,
-        status_message=status_message
+        metrics=ModelMetrics(
+            total_audits=total_audits,
+            passed_audits=passed,
+            failed_audits=failed,
+            last_audit_status=last_audit.audit_result if last_audit else None,
+            last_audit_time=last_audit.executed_at if last_audit else None,
+            avg_drift_score=round(avg_drift, 2) if avg_drift is not None else None,
+            avg_bias_score=round(avg_bias, 2) if avg_bias is not None else None,
+            avg_risk_score=round(avg_risk, 2) if avg_risk is not None else None,
+            recent_findings=[FindingResponse.model_validate(f) for f in recent_findings]
+        )
     )
 
 

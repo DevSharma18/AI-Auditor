@@ -38,10 +38,17 @@ class AuditResultEnum(str, Enum):
 
 
 class Severity(str, Enum):
+    INFO = "INFO"
     LOW = "LOW"
     MEDIUM = "MEDIUM"
     HIGH = "HIGH"
     CRITICAL = "CRITICAL"
+
+
+class DashboardStatus(str, Enum):
+    NO_DATA = "NO_DATA"
+    BASELINE_NOT_ESTABLISHED = "BASELINE_NOT_ESTABLISHED"
+    OK = "OK"
 
 
 class FindingCategory(str, Enum):
@@ -153,7 +160,7 @@ class AuditResponse(BaseModel):
         from_attributes = True
 
 
-class DashboardOverview(BaseModel):
+class DashboardMetrics(BaseModel):
     total_models: int
     total_audits: int
     passed_audits: int
@@ -163,15 +170,15 @@ class DashboardOverview(BaseModel):
     overall_risk_score: Optional[float] = None
     audit_status_distribution: Dict[str, int]
     drift_score_percentage: Optional[float] = None
-    has_data: bool = False
-    status_message: str = "No audits executed yet"
 
 
-class ModelDashboard(BaseModel):
-    model_id: str
-    model_name: str
-    model_version: str
-    connection_type: str
+class DashboardOverview(BaseModel):
+    status: str
+    message: str
+    metrics: Optional[DashboardMetrics] = None
+
+
+class ModelMetrics(BaseModel):
     total_audits: int
     passed_audits: int
     failed_audits: int
@@ -181,5 +188,14 @@ class ModelDashboard(BaseModel):
     avg_bias_score: Optional[float] = None
     avg_risk_score: Optional[float] = None
     recent_findings: List[FindingResponse]
+
+
+class ModelDashboard(BaseModel):
+    model_id: str
+    model_name: str
+    model_version: str
+    connection_type: str
+    status: str
+    message: str
     baseline_established: bool = False
-    status_message: str = "No audits executed yet"
+    metrics: Optional[ModelMetrics] = None

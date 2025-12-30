@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -11,10 +12,22 @@ from backend.audit_engine import AuditEngine
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Configuration flag - scheduler disabled by default for development
+ENABLE_SCHEDULER = os.environ.get("ENABLE_SCHEDULER", "false").lower() == "true"
+
 scheduler = BackgroundScheduler()
 
 
 def run_scheduled_audits():
+    """
+    Run scheduled audits only when evidence sources provide real data.
+    Does NOT create audits automatically - only runs when explicitly scheduled
+    and evidence sources have data to process.
+    """
+    if not ENABLE_SCHEDULER:
+        logger.info("Scheduler disabled - skipping audit check")
+        return
+    
     db = SessionLocal()
     try:
         logger.info("Running scheduled audit check...")
@@ -59,6 +72,15 @@ def run_scheduled_audits():
 
 
 def start_scheduler():
+    """
+    Start the scheduler if ENABLE_SCHEDULER is true.
+    By default, scheduler is disabled in development.
+    Set ENABLE_SCHEDULER=true environment variable to enable.
+    """
+    if not ENABLE_SCHEDULER:
+        logger.info("Audit scheduler disabled (set ENABLE_SCHEDULER=true to enable)")
+        return
+    
     scheduler.add_job(
         run_scheduled_audits,
         CronTrigger(hour="*/1"),
@@ -72,5 +94,6 @@ def start_scheduler():
 
 
 def stop_scheduler():
-    scheduler.shutdown()
-    logger.info("Audit scheduler stopped")
+    if ENABLE_SCHEDULER and scheduler.running:
+        scheduler.shutdown()
+        logger.info("Audit scheduler stopped")
