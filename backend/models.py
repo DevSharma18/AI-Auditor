@@ -35,6 +35,7 @@ class AuditResult(str, enum.Enum):
     AUDIT_WARN = "AUDIT_WARN"
     AUDIT_FAIL = "AUDIT_FAIL"
     BASELINE_CREATED = "BASELINE_CREATED"
+    NO_EVIDENCE = "NO_EVIDENCE"
 
 class AuditType(str, enum.Enum):
     PASSIVE = "passive"
@@ -52,6 +53,14 @@ class FindingCategory(str, enum.Enum):
     RISK = "risk"
     COMPLIANCE = "compliance"
     SECURITY = "security"
+    SYSTEM = "system"
+
+class FindingSeverity(str, enum.Enum):
+    INFO = "INFO"
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+    CRITICAL = "CRITICAL"
 
 
 class AIModel(Base):
@@ -78,6 +87,8 @@ class EvidenceSource(Base):
     source_type = Column(String, nullable=False)
     config = Column(JSON, default={})
     read_only = Column(Boolean, default=True)
+    last_data_snapshot = Column(JSON, nullable=True)
+    last_fetch_at = Column(DateTime, nullable=True)
 
     model = relationship("AIModel", back_populates="evidence_sources")
 
@@ -119,12 +130,13 @@ class AuditSummary(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     audit_id = Column(Integer, ForeignKey("audit_runs.id"), nullable=False)
-    drift_score = Column(Float, default=0.0)
-    bias_score = Column(Float, default=0.0)
-    risk_score = Column(Float, default=0.0)
+    drift_score = Column(Float, nullable=True)
+    bias_score = Column(Float, nullable=True)
+    risk_score = Column(Float, nullable=True)
     total_findings = Column(Integer, default=0)
     critical_findings = Column(Integer, default=0)
     high_findings = Column(Integer, default=0)
+    metrics_snapshot = Column(JSON, nullable=True)
 
     audit_run = relationship("AuditRun", back_populates="summary")
 

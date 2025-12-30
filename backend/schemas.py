@@ -34,6 +34,7 @@ class AuditResultEnum(str, Enum):
     AUDIT_WARN = "AUDIT_WARN"
     AUDIT_FAIL = "AUDIT_FAIL"
     BASELINE_CREATED = "BASELINE_CREATED"
+    NO_EVIDENCE = "NO_EVIDENCE"
 
 
 class Severity(str, Enum):
@@ -49,6 +50,7 @@ class FindingCategory(str, Enum):
     RISK = "risk"
     COMPLIANCE = "compliance"
     SECURITY = "security"
+    SYSTEM = "system"
 
 
 class ModelRegister(BaseModel):
@@ -115,7 +117,7 @@ class FindingResponse(BaseModel):
     metric_name: str
     baseline_value: Optional[float]
     current_value: Optional[float]
-    deviation_percentage: float
+    deviation_percentage: Optional[float]
     description: Optional[str]
 
     class Config:
@@ -123,12 +125,12 @@ class FindingResponse(BaseModel):
 
 
 class AuditSummaryResponse(BaseModel):
-    drift_score: float
-    bias_score: float
-    risk_score: float
-    total_findings: int
-    critical_findings: int
-    high_findings: int
+    drift_score: Optional[float] = None
+    bias_score: Optional[float] = None
+    risk_score: Optional[float] = None
+    total_findings: int = 0
+    critical_findings: int = 0
+    high_findings: int = 0
 
     class Config:
         from_attributes = True
@@ -158,9 +160,11 @@ class DashboardOverview(BaseModel):
     failed_audits: int
     critical_findings_count: int
     high_findings_count: int
-    overall_risk_score: float
+    overall_risk_score: Optional[float] = None
     audit_status_distribution: Dict[str, int]
-    drift_score_percentage: float
+    drift_score_percentage: Optional[float] = None
+    has_data: bool = False
+    status_message: str = "No audits executed yet"
 
 
 class ModelDashboard(BaseModel):
@@ -173,7 +177,9 @@ class ModelDashboard(BaseModel):
     failed_audits: int
     last_audit_status: Optional[str]
     last_audit_time: Optional[datetime]
-    avg_drift_score: float
-    avg_bias_score: float
-    avg_risk_score: float
+    avg_drift_score: Optional[float] = None
+    avg_bias_score: Optional[float] = None
+    avg_risk_score: Optional[float] = None
     recent_findings: List[FindingResponse]
+    baseline_established: bool = False
+    status_message: str = "No audits executed yet"

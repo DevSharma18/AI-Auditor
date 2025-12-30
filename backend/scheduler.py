@@ -69,8 +69,6 @@ def start_scheduler():
     
     scheduler.start()
     logger.info("Audit scheduler started")
-    
-    run_scheduled_audits()
 
 
 def stop_scheduler():

@@ -5,12 +5,11 @@ import uvicorn
 from backend.database import init_db
 from backend.routes import router
 from backend.scheduler import start_scheduler, stop_scheduler
-from backend.seed_data import seed_database
 
 app = FastAPI(
     title="AI Auditor API",
-    description="Backend API for AI Model Auditing Platform",
-    version="1.0.0"
+    description="Backend API for AI Model Auditing Platform - Real-Time Evidence-Driven",
+    version="2.0.0"
 )
 
 app.add_middleware(
@@ -27,7 +26,6 @@ app.include_router(router, prefix="/api")
 @app.on_event("startup")
 async def startup_event():
     init_db()
-    seed_database()
     start_scheduler()
 
 

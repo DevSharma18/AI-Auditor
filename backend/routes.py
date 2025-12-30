@@ -108,6 +108,17 @@ def get_model(model_id: str, db: Session = Depends(get_db)):
     )
 
 
+@router.delete("/models/{model_id}", tags=["Models"])
+def delete_model(model_id: str, db: Session = Depends(get_db)):
+    model = db.query(AIModel).filter(AIModel.model_id == model_id).first()
+    if not model:
+        raise HTTPException(status_code=404, detail="Model not found")
+    
+    db.delete(model)
+    db.commit()
+    return {"message": "Model deleted successfully"}
+
+
 @router.post("/audit-policies", response_model=AuditPolicyResponse, tags=["Audit Policies"])
 def create_audit_policy(policy_data: AuditPolicyCreate, db: Session = Depends(get_db)):
     model = db.query(AIModel).filter(AIModel.id == policy_data.model_id).first()
@@ -265,19 +276,53 @@ def get_dashboard_overview(db: Session = Depends(get_db)):
     total_models = db.query(AIModel).count()
     total_audits = db.query(AuditRun).count()
     
+    if total_audits == 0:
+        return DashboardOverview(
+            total_models=total_models,
+            total_audits=0,
+            passed_audits=0,
+            failed_audits=0,
+            critical_findings_count=0,
+            high_findings_count=0,
+            overall_risk_score=None,
+            audit_status_distribution={
+                "AUDIT_PASS": 0,
+                "AUDIT_WARN": 0,
+                "AUDIT_FAIL": 0,
+                "BASELINE_CREATED": 0,
+                "NO_EVIDENCE": 0
+            },
+            drift_score_percentage=None,
+            has_data=False,
+            status_message="No audits executed yet" if total_models > 0 else "No models registered yet"
+        )
+    
     passed_audits = db.query(AuditRun).filter(AuditRun.audit_result == "AUDIT_PASS").count()
     failed_audits = db.query(AuditRun).filter(AuditRun.audit_result == "AUDIT_FAIL").count()
     
     critical_findings = db.query(AuditFinding).filter(AuditFinding.severity == "CRITICAL").count()
     high_findings = db.query(AuditFinding).filter(AuditFinding.severity == "HIGH").count()
     
-    avg_risk = db.query(func.avg(AuditSummary.risk_score)).scalar() or 0.0
-    avg_drift = db.query(func.avg(AuditSummary.drift_score)).scalar() or 0.0
+    avg_risk = db.query(func.avg(AuditSummary.risk_score)).filter(AuditSummary.risk_score.isnot(None)).scalar()
+    avg_drift = db.query(func.avg(AuditSummary.drift_score)).filter(AuditSummary.drift_score.isnot(None)).scalar()
     
     pass_count = db.query(AuditRun).filter(AuditRun.audit_result == "AUDIT_PASS").count()
     warn_count = db.query(AuditRun).filter(AuditRun.audit_result == "AUDIT_WARN").count()
     fail_count = db.query(AuditRun).filter(AuditRun.audit_result == "AUDIT_FAIL").count()
     baseline_count = db.query(AuditRun).filter(AuditRun.audit_result == "BASELINE_CREATED").count()
+    no_evidence_count = db.query(AuditRun).filter(AuditRun.audit_result == "NO_EVIDENCE").count()
+    
+    has_real_audits = (pass_count + warn_count + fail_count) > 0
+    
+    if not has_real_audits:
+        if baseline_count > 0:
+            status_message = "Baseline established, waiting for comparison audits"
+        elif no_evidence_count > 0:
+            status_message = "No evidence found in audit windows"
+        else:
+            status_message = "Audits pending"
+    else:
+        status_message = "Real-time metrics computed from audit data"
     
     return DashboardOverview(
         total_models=total_models,
@@ -286,14 +331,17 @@ def get_dashboard_overview(db: Session = Depends(get_db)):
         failed_audits=failed_audits,
         critical_findings_count=critical_findings,
         high_findings_count=high_findings,
-        overall_risk_score=round(avg_risk, 2),
+        overall_risk_score=round(avg_risk, 2) if avg_risk is not None else None,
         audit_status_distribution={
             "AUDIT_PASS": pass_count,
             "AUDIT_WARN": warn_count,
             "AUDIT_FAIL": fail_count,
-            "BASELINE_CREATED": baseline_count
+            "BASELINE_CREATED": baseline_count,
+            "NO_EVIDENCE": no_evidence_count
         },
-        drift_score_percentage=round(avg_drift, 2)
+        drift_score_percentage=round(avg_drift, 2) if avg_drift is not None else None,
+        has_data=has_real_audits,
+        status_message=status_message
     )
 
 
@@ -304,6 +352,26 @@ def get_model_dashboard(model_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Model not found")
     
     total_audits = db.query(AuditRun).filter(AuditRun.model_id == model.id).count()
+    
+    if total_audits == 0:
+        return ModelDashboard(
+            model_id=model.model_id,
+            model_name=model.name,
+            model_version=model.version,
+            connection_type=model.connection_type,
+            total_audits=0,
+            passed_audits=0,
+            failed_audits=0,
+            last_audit_status=None,
+            last_audit_time=None,
+            avg_drift_score=None,
+            avg_bias_score=None,
+            avg_risk_score=None,
+            recent_findings=[],
+            baseline_established=False,
+            status_message="No audits executed yet"
+        )
+    
     passed = db.query(AuditRun).filter(AuditRun.model_id == model.id, AuditRun.audit_result == "AUDIT_PASS").count()
     failed = db.query(AuditRun).filter(AuditRun.model_id == model.id, AuditRun.audit_result == "AUDIT_FAIL").count()
     
@@ -321,9 +389,19 @@ def get_model_dashboard(model_id: str, db: Session = Depends(get_db)):
         .all()
     )
     
-    avg_drift = sum(s.drift_score for s in summaries) / len(summaries) if summaries else 0
-    avg_bias = sum(s.bias_score for s in summaries) / len(summaries) if summaries else 0
-    avg_risk = sum(s.risk_score for s in summaries) / len(summaries) if summaries else 0
+    drift_scores = [s.drift_score for s in summaries if s.drift_score is not None]
+    bias_scores = [s.bias_score for s in summaries if s.bias_score is not None]
+    risk_scores = [s.risk_score for s in summaries if s.risk_score is not None]
+    
+    avg_drift = sum(drift_scores) / len(drift_scores) if drift_scores else None
+    avg_bias = sum(bias_scores) / len(bias_scores) if bias_scores else None
+    avg_risk = sum(risk_scores) / len(risk_scores) if risk_scores else None
+    
+    baseline_audit = db.query(AuditRun).filter(
+        AuditRun.model_id == model.id,
+        AuditRun.audit_result.in_(["BASELINE_CREATED", "AUDIT_PASS", "AUDIT_WARN"])
+    ).first()
+    baseline_established = baseline_audit is not None
     
     recent_findings = (
         db.query(AuditFinding)
@@ -333,6 +411,13 @@ def get_model_dashboard(model_id: str, db: Session = Depends(get_db)):
         .limit(10)
         .all()
     )
+    
+    if not baseline_established:
+        status_message = "Baseline not established"
+    elif avg_drift is None and avg_bias is None and avg_risk is None:
+        status_message = "Awaiting comparison audits"
+    else:
+        status_message = "Real-time metrics computed from audit data"
     
     return ModelDashboard(
         model_id=model.model_id,
@@ -344,10 +429,12 @@ def get_model_dashboard(model_id: str, db: Session = Depends(get_db)):
         failed_audits=failed,
         last_audit_status=last_audit.audit_result if last_audit else None,
         last_audit_time=last_audit.executed_at if last_audit else None,
-        avg_drift_score=round(avg_drift, 2),
-        avg_bias_score=round(avg_bias, 2),
-        avg_risk_score=round(avg_risk, 2),
-        recent_findings=[FindingResponse.model_validate(f) for f in recent_findings]
+        avg_drift_score=round(avg_drift, 2) if avg_drift is not None else None,
+        avg_bias_score=round(avg_bias, 2) if avg_bias is not None else None,
+        avg_risk_score=round(avg_risk, 2) if avg_risk is not None else None,
+        recent_findings=[FindingResponse.model_validate(f) for f in recent_findings],
+        baseline_established=baseline_established,
+        status_message=status_message
     )
 
 
