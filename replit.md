@@ -103,11 +103,44 @@ The system is now **evidence-driven and real-time**. Key design principles:
 
 The application runs on port 5000 using `npm run dev` which starts both the Express backend and Vite frontend.
 
+### Environment Variables
+- `ENABLE_SCHEDULER`: Set to `true` to enable automated audit scheduling. Disabled by default in development.
+
+## Dashboard API Contract
+
+Dashboard endpoints return explicit status states with nullable metrics:
+
+```json
+// When no audits exist or all audits are NO_EVIDENCE:
+{
+  "status": "NO_DATA",
+  "message": "No audits have been executed yet",
+  "metrics": null
+}
+
+// When only baselines exist without comparison audits:
+{
+  "status": "BASELINE_NOT_ESTABLISHED", 
+  "message": "Baseline has been created but no comparison audits exist yet",
+  "metrics": null
+}
+
+// When real comparison audits exist (PASS/WARN/FAIL):
+{
+  "status": "OK",
+  "message": "Real-time metrics computed from audit data",
+  "metrics": { /* actual metrics */ }
+}
+```
+
 ## Recent Changes (December 2025)
 
 - Removed all seed data and demo model generation
 - Rewrote audit engine to be evidence-driven
 - Added NO_EVIDENCE audit result type
 - Made all metric scores nullable
-- Added proper empty state handling in dashboard endpoints
+- **Implemented strict NO_DATA dashboard states**
+- Dashboard returns `status` + `message` + nullable `metrics`
+- Metrics computed ONLY from database - no fallback values
+- Added `ENABLE_SCHEDULER` environment variable (default: false)
 - Scheduler no longer runs audits on startup
