@@ -1,0 +1,147 @@
+from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, ForeignKey, JSON, Enum as SQLEnum
+from sqlalchemy.orm import relationship
+from datetime import datetime
+import enum
+
+from backend.database import Base
+
+class ModelType(str, enum.Enum):
+    LLM = "llm"
+    ML = "ml"
+
+class ConnectionType(str, enum.Enum):
+    API = "api"
+    LOGS = "logs"
+    BATCH = "batch"
+    CONTAINER = "container"
+    SAMPLE = "sample"
+
+class AuditFrequency(str, enum.Enum):
+    DAILY = "daily"
+    WEEKLY = "weekly"
+    MONTHLY = "monthly"
+
+class BaselineStrategy(str, enum.Enum):
+    PREVIOUS_AUDIT = "previous_audit"
+    MODEL_VERSION = "model_version"
+
+class ExecutionStatus(str, enum.Enum):
+    SUCCESS = "SUCCESS"
+    PARTIAL = "PARTIAL"
+    FAILED = "FAILED"
+
+class AuditResult(str, enum.Enum):
+    AUDIT_PASS = "AUDIT_PASS"
+    AUDIT_WARN = "AUDIT_WARN"
+    AUDIT_FAIL = "AUDIT_FAIL"
+    BASELINE_CREATED = "BASELINE_CREATED"
+
+class AuditType(str, enum.Enum):
+    PASSIVE = "passive"
+    ACTIVE = "active"
+
+class Severity(str, enum.Enum):
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+    CRITICAL = "CRITICAL"
+
+class FindingCategory(str, enum.Enum):
+    DRIFT = "drift"
+    BIAS = "bias"
+    RISK = "risk"
+    COMPLIANCE = "compliance"
+    SECURITY = "security"
+
+
+class AIModel(Base):
+    __tablename__ = "ai_models"
+
+    id = Column(Integer, primary_key=True, index=True)
+    model_id = Column(String, unique=True, index=True, nullable=False)
+    name = Column(String, nullable=False)
+    version = Column(String, default="1.0")
+    model_type = Column(String, default="llm")
+    connection_type = Column(String, default="api")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    evidence_sources = relationship("EvidenceSource", back_populates="model", cascade="all, delete-orphan")
+    audit_policies = relationship("AuditPolicy", back_populates="model", cascade="all, delete-orphan")
+    audit_runs = relationship("AuditRun", back_populates="model", cascade="all, delete-orphan")
+
+
+class EvidenceSource(Base):
+    __tablename__ = "evidence_sources"
+
+    id = Column(Integer, primary_key=True, index=True)
+    model_id = Column(Integer, ForeignKey("ai_models.id"), nullable=False)
+    source_type = Column(String, nullable=False)
+    config = Column(JSON, default={})
+    read_only = Column(Boolean, default=True)
+
+    model = relationship("AIModel", back_populates="evidence_sources")
+
+
+class AuditPolicy(Base):
+    __tablename__ = "audit_policies"
+
+    id = Column(Integer, primary_key=True, index=True)
+    model_id = Column(Integer, ForeignKey("ai_models.id"), nullable=False)
+    audit_frequency = Column(String, default="daily")
+    baseline_strategy = Column(String, default="previous_audit")
+    audit_scope = Column(JSON, default={"drift": True, "bias": True, "risk": True, "compliance": True, "active_security": False})
+    policy_reference = Column(JSON, default={})
+    active_audit_enabled = Column(Boolean, default=False)
+    last_run_at = Column(DateTime, nullable=True)
+
+    model = relationship("AIModel", back_populates="audit_policies")
+
+
+class AuditRun(Base):
+    __tablename__ = "audit_runs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    audit_id = Column(String, unique=True, index=True, nullable=False)
+    model_id = Column(Integer, ForeignKey("ai_models.id"), nullable=False)
+    audit_type = Column(String, default="passive")
+    scheduled_at = Column(DateTime, nullable=True)
+    executed_at = Column(DateTime, default=datetime.utcnow)
+    execution_status = Column(String, default="SUCCESS")
+    audit_result = Column(String, default="AUDIT_PASS")
+
+    model = relationship("AIModel", back_populates="audit_runs")
+    summary = relationship("AuditSummary", back_populates="audit_run", uselist=False, cascade="all, delete-orphan")
+    findings = relationship("AuditFinding", back_populates="audit_run", cascade="all, delete-orphan")
+
+
+class AuditSummary(Base):
+    __tablename__ = "audit_summaries"
+
+    id = Column(Integer, primary_key=True, index=True)
+    audit_id = Column(Integer, ForeignKey("audit_runs.id"), nullable=False)
+    drift_score = Column(Float, default=0.0)
+    bias_score = Column(Float, default=0.0)
+    risk_score = Column(Float, default=0.0)
+    total_findings = Column(Integer, default=0)
+    critical_findings = Column(Integer, default=0)
+    high_findings = Column(Integer, default=0)
+
+    audit_run = relationship("AuditRun", back_populates="summary")
+
+
+class AuditFinding(Base):
+    __tablename__ = "audit_findings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    finding_id = Column(String, unique=True, index=True, nullable=False)
+    audit_id = Column(Integer, ForeignKey("audit_runs.id"), nullable=False)
+    category = Column(String, nullable=False)
+    rule_id = Column(String, nullable=True)
+    severity = Column(String, default="MEDIUM")
+    metric_name = Column(String, nullable=False)
+    baseline_value = Column(Float, nullable=True)
+    current_value = Column(Float, nullable=True)
+    deviation_percentage = Column(Float, default=0.0)
+    description = Column(String, nullable=True)
+
+    audit_run = relationship("AuditRun", back_populates="findings")
