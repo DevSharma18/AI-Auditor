@@ -2,9 +2,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
-from backend.database import init_db
-from backend.routes import router
-from backend.scheduler import start_scheduler, stop_scheduler
+from database import init_db
+from routes import router
+from scheduler import start_scheduler, stop_scheduler
 
 app = FastAPI(
     title="AI Auditor API",

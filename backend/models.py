@@ -3,7 +3,7 @@ from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
 
-from backend.database import Base
+from database import Base
 
 class ModelType(str, enum.Enum):
     LLM = "llm"

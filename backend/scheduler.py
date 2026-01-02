@@ -5,9 +5,9 @@ from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy.orm import Session
 import logging
 
-from backend.database import SessionLocal
-from backend.models import AIModel, AuditPolicy
-from backend.audit_engine import AuditEngine
+from database import SessionLocal
+from models import AIModel, AuditPolicy
+from audit_engine import AuditEngine
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

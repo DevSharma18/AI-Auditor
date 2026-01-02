@@ -4,7 +4,7 @@ from typing import Dict, List, Optional, Tuple, Any
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
-from backend.models import (
+from models import (
     AIModel, AuditRun, AuditSummary, AuditFinding, AuditPolicy, EvidenceSource
 )
 

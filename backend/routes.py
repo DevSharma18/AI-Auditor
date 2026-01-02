@@ -4,14 +4,14 @@ from sqlalchemy import func
 from typing import List, Optional
 from datetime import datetime
 
-from backend.database import get_db
-from backend.models import AIModel, EvidenceSource, AuditPolicy, AuditRun, AuditSummary, AuditFinding
-from backend.schemas import (
+from database import get_db
+from models import AIModel, EvidenceSource, AuditPolicy, AuditRun, AuditSummary, AuditFinding
+from schemas import (
     ModelRegister, ModelResponse, AuditPolicyCreate, AuditPolicyResponse,
     AuditResponse, AuditSummaryResponse, FindingResponse,
     DashboardOverview, ModelDashboard, DashboardMetrics, ModelMetrics
 )
-from backend.audit_engine import AuditEngine
+from audit_engine import AuditEngine
 
 router = APIRouter()
 
