@@ -157,3 +157,32 @@ class AuditFinding(Base):
     description = Column(String, nullable=True)
 
     audit_run = relationship("AuditRun", back_populates="findings")
+
+class ModelConnector(Base):
+    __tablename__ = "model_connectors"
+
+    id = Column(Integer, primary_key=True)
+    model_id = Column(Integer, ForeignKey("ai_models.id"), nullable=False)
+
+    endpoint = Column(String, nullable=False)
+    method = Column(String, default="POST")
+    headers = Column(JSON, default={})
+    request_template = Column(JSON, nullable=False)
+
+    response_path = Column(String, nullable=True)
+    timeout_seconds = Column(Integer, default=30)
+
+    model = relationship("AIModel", backref="connector")
+
+class PromptTest(Base):
+    __tablename__ = "prompt_tests"
+
+    id = Column(Integer, primary_key=True)
+    model_id = Column(Integer, ForeignKey("ai_models.id"), nullable=False)
+
+    category = Column(String)  # bias / hallucination / pii / jailbreak
+    prompt = Column(String, nullable=False)
+    expected_behavior = Column(String, nullable=True)
+
+    model = relationship("AIModel", backref="prompt_tests")
+

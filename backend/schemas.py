@@ -1,8 +1,12 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from enum import Enum
 
+
+# =========================
+# ENUMS
+# =========================
 
 class ModelType(str, Enum):
     LLM = "llm"
@@ -45,12 +49,6 @@ class Severity(str, Enum):
     CRITICAL = "CRITICAL"
 
 
-class DashboardStatus(str, Enum):
-    NO_DATA = "NO_DATA"
-    BASELINE_NOT_ESTABLISHED = "BASELINE_NOT_ESTABLISHED"
-    OK = "OK"
-
-
 class FindingCategory(str, Enum):
     DRIFT = "drift"
     BIAS = "bias"
@@ -59,6 +57,10 @@ class FindingCategory(str, Enum):
     SECURITY = "security"
     SYSTEM = "system"
 
+
+# =========================
+# MODEL REGISTRATION
+# =========================
 
 class ModelRegister(BaseModel):
     model_id: str
@@ -84,18 +86,44 @@ class ModelResponse(BaseModel):
         from_attributes = True
 
 
+# =========================
+# EVIDENCE SOURCES
+# =========================
+
 class EvidenceSourceCreate(BaseModel):
     model_id: int
     source_type: str
-    config: Dict[str, Any] = {}
+    config: Dict[str, Any]
     read_only: bool = True
 
+
+class EvidenceSourceResponse(BaseModel):
+    id: int
+    model_id: int
+    source_type: str
+    config: Dict[str, Any]
+    read_only: bool
+    last_fetch_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+# =========================
+# AUDIT POLICIES
+# =========================
 
 class AuditPolicyCreate(BaseModel):
     model_id: int
     audit_frequency: str = "daily"
     baseline_strategy: str = "previous_audit"
-    audit_scope: Dict[str, bool] = {"drift": True, "bias": True, "risk": True, "compliance": True, "active_security": False}
+    audit_scope: Dict[str, bool] = {
+        "drift": True,
+        "bias": True,
+        "risk": True,
+        "compliance": True,
+        "active_security": False
+    }
     policy_reference: Dict[str, Any] = {}
     active_audit_enabled: bool = False
 
@@ -114,6 +142,10 @@ class AuditPolicyResponse(BaseModel):
         from_attributes = True
 
 
+# =========================
+# AUDIT FINDINGS
+# =========================
+
 class FindingResponse(BaseModel):
     id: int
     finding_id: str
@@ -130,6 +162,10 @@ class FindingResponse(BaseModel):
     class Config:
         from_attributes = True
 
+
+# =========================
+# AUDIT SUMMARY / RESPONSE
+# =========================
 
 class AuditSummaryResponse(BaseModel):
     drift_score: Optional[float] = None
@@ -159,6 +195,10 @@ class AuditResponse(BaseModel):
     class Config:
         from_attributes = True
 
+
+# =========================
+# DASHBOARD
+# =========================
 
 class DashboardMetrics(BaseModel):
     total_models: int

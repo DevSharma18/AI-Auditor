@@ -3,6 +3,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from typing import List, Optional
 from datetime import datetime
+from schemas import EvidenceSourceCreate, EvidenceSourceResponse
+
 
 from database import get_db
 from models import AIModel, EvidenceSource, AuditPolicy, AuditRun, AuditSummary, AuditFinding
@@ -14,6 +16,33 @@ from schemas import (
 from audit_engine import AuditEngine
 
 router = APIRouter()
+
+@router.post(
+    "/evidence-sources",
+    response_model=EvidenceSourceResponse,
+    tags=["Evidence Sources"]
+)
+def create_evidence_source(
+    source: EvidenceSourceCreate,
+    db: Session = Depends(get_db)
+):
+    model = db.query(AIModel).filter(AIModel.id == source.model_id).first()
+    if not model:
+        raise HTTPException(status_code=404, detail="Model not found")
+
+    evidence = EvidenceSource(
+        model_id=source.model_id,
+        source_type=source.source_type,
+        config=source.config,
+        read_only=source.read_only
+    )
+
+    db.add(evidence)
+    db.commit()
+    db.refresh(evidence)
+
+    return evidence
+
 
 
 @router.post("/models/register", response_model=ModelResponse, tags=["Models"])
@@ -106,6 +135,16 @@ def get_model(model_id: str, db: Session = Depends(get_db)):
         last_audit_time=last_audit.executed_at if last_audit else None,
         audit_frequency=policy.audit_frequency if policy else None
     )
+
+@router.get(
+    "/evidence-sources/{model_id}",
+    response_model=List[EvidenceSourceResponse],
+    tags=["Evidence Sources"]
+)
+def get_evidence_sources(model_id: int, db: Session = Depends(get_db)):
+    return db.query(EvidenceSource).filter(
+        EvidenceSource.model_id == model_id
+    ).all()
 
 
 @router.delete("/models/{model_id}", tags=["Models"])
@@ -533,3 +572,29 @@ def trigger_audit(model_id: str, db: Session = Depends(get_db)):
         ) if summary else None,
         findings_count=findings_count
     )
+
+@router.post("/audits/active/{model_id}", response_model=AuditResponse)
+def trigger_active_audit(model_id: str, db: Session = Depends(get_db)):
+    model = db.query(AIModel).filter(AIModel.model_id == model_id).first()
+    if not model:
+        raise HTTPException(404, "Model not found")
+
+    policy = db.query(AuditPolicy).filter(AuditPolicy.model_id == model.id).first()
+    engine = AuditEngine(db)
+
+    audit = engine.run_active_prompt_audit(model, policy)
+    summary = db.query(AuditSummary).filter(AuditSummary.audit_id == audit.id).first()
+
+    return AuditResponse(
+        id=audit.id,
+        audit_id=audit.audit_id,
+        model_id=audit.model_id,
+        model_name=model.name,
+        audit_type=audit.audit_type,
+        executed_at=audit.executed_at,
+        execution_status=audit.execution_status,
+        audit_result=audit.audit_result,
+        summary=AuditSummaryResponse.model_validate(summary) if summary else None,
+        findings_count=len(audit.findings)
+    )
+
