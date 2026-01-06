@@ -22,3 +22,5 @@ dist/
 # Local apps
 client/my-app/
 
+.env
+.env

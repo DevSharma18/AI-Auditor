@@ -1,3 +1,7 @@
+from dotenv import load_dotenv
+load_dotenv(dotenv_path=".env")
+
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
@@ -5,6 +9,8 @@ import uvicorn
 from database import init_db
 from routes import router
 from scheduler import start_scheduler, stop_scheduler
+
+
 
 app = FastAPI(
     title="AI Auditor API",

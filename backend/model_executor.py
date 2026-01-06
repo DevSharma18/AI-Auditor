@@ -1,40 +1,48 @@
+import os
+import time
 import requests
-from jsonpath_ng import parse
-from copy import deepcopy
 
-def deep_replace(obj, token, value):
-    if isinstance(obj, dict):
-        return {k: deep_replace(v, token, value) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [deep_replace(i, token, value) for i in obj]
-    if isinstance(obj, str):
-        return obj.replace(token, value)
-    return obj
+class ModelExecutor:
+    def __init__(self, config: dict):
+        self.endpoint = config["endpoint"]
+        self.method = config.get("method", "POST")
 
+        # Copy headers
+        headers = dict(config.get("headers", {}))
 
-def execute_model(connector, prompt: str):
-    payload = deepcopy(connector.request_template)
-    payload = deep_replace(payload, "{{PROMPT}}", prompt)
+        # 🔑 Resolve OpenAI API key
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY not found in environment")
 
-    response = requests.request(
-        method=connector.method,
-        url=connector.endpoint,
-        headers=connector.headers,
-        json=payload,
-        timeout=connector.timeout_seconds
-    )
+        # Replace placeholder OR override Authorization
+        headers["Authorization"] = f"Bearer {api_key}"
+        headers.setdefault("Content-Type", "application/json")
 
-    data = response.json()
+        self.headers = headers
+        self.request_template = config.get("request_template", {})
+        self.timeout_seconds = config.get("timeout_seconds", 30)
+        self.session = requests.Session()
 
-    if connector.response_path:
-        expr = parse(connector.response_path)
-        matches = expr.find(data)
-        output = matches[0].value if matches else None
-    else:
-        output = data
+    def execute_active_prompt(self, prompt: str):
+        payload = dict(self.request_template)
+        payload["messages"] = [
+            {"role": "user", "content": prompt}
+        ]
 
-    return {
-        "status": response.status_code,
-        "raw": data,
-        "output": output
-    }
+        start = time.time()
+        response = self.session.request(
+            method=self.method,
+            url=self.endpoint,
+            headers=self.headers,
+            json=payload,
+            timeout=self.timeout_seconds,
+        )
+        latency = time.time() - start
+
+        response.raise_for_status()
+
+        return {
+            "raw_response": response.json(),
+            "latency": latency,
+        }

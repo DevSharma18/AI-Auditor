@@ -179,21 +179,20 @@ class AuditSummaryResponse(BaseModel):
         from_attributes = True
 
 
+from typing import Optional
+from datetime import datetime
+
 class AuditResponse(BaseModel):
     id: int
     audit_id: str
     model_id: int
-    model_name: Optional[str] = None
     audit_type: str
-    scheduled_at: Optional[datetime]
     executed_at: datetime
+    scheduled_at: Optional[datetime] = None
     execution_status: str
     audit_result: str
-    summary: Optional[AuditSummaryResponse] = None
-    findings_count: int = 0
+    findings_count: int
 
-    class Config:
-        from_attributes = True
 
 
 # =========================

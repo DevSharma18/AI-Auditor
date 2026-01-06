@@ -15,6 +15,18 @@ from schemas import (
 )
 from audit_engine import AuditEngine
 
+# =========================
+# FRONTEND NORMALIZATION
+# =========================
+
+def normalize_execution_status(status: str) -> str:
+    if status in ["SUCCESS", "PARTIAL"]:
+        return "completed"
+    if status == "FAILED":
+        return "failed"
+    return "unknown"
+
+
 router = APIRouter()
 
 @router.post(
@@ -42,6 +54,9 @@ def create_evidence_source(
     db.refresh(evidence)
 
     return evidence
+
+
+
 
 
 
@@ -205,7 +220,8 @@ def get_audits(db: Session = Depends(get_db)):
             audit_type=audit.audit_type,
             scheduled_at=audit.scheduled_at,
             executed_at=audit.executed_at,
-            execution_status=audit.execution_status,
+            execution_status=normalize_execution_status(audit.execution_status),
+
             audit_result=audit.audit_result,
             summary=AuditSummaryResponse(
                 drift_score=summary.drift_score,
@@ -240,7 +256,8 @@ def get_audit(audit_id: str, db: Session = Depends(get_db)):
         audit_type=audit.audit_type,
         scheduled_at=audit.scheduled_at,
         executed_at=audit.executed_at,
-        execution_status=audit.execution_status,
+        execution_status=normalize_execution_status(audit.execution_status),
+
         audit_result=audit.audit_result,
         summary=AuditSummaryResponse(
             drift_score=summary.drift_score,
@@ -280,7 +297,8 @@ def get_model_audits(model_id: str, db: Session = Depends(get_db)):
             audit_type=audit.audit_type,
             scheduled_at=audit.scheduled_at,
             executed_at=audit.executed_at,
-            execution_status=audit.execution_status,
+            execution_status=normalize_execution_status(audit.execution_status),
+
             audit_result=audit.audit_result,
             summary=AuditSummaryResponse(
                 drift_score=summary.drift_score,
@@ -560,7 +578,7 @@ def trigger_audit(model_id: str, db: Session = Depends(get_db)):
         audit_type=audit.audit_type,
         scheduled_at=audit.scheduled_at,
         executed_at=audit.executed_at,
-        execution_status=audit.execution_status,
+        execution_status=normalize_execution_status(audit.execution_status),
         audit_result=audit.audit_result,
         summary=AuditSummaryResponse(
             drift_score=summary.drift_score,
@@ -582,8 +600,12 @@ def trigger_active_audit(model_id: str, db: Session = Depends(get_db)):
     policy = db.query(AuditPolicy).filter(AuditPolicy.model_id == model.id).first()
     engine = AuditEngine(db)
 
-    audit = engine.run_active_prompt_audit(model, policy)
+    audit = engine.run_active_audit(model, policy)
     summary = db.query(AuditSummary).filter(AuditSummary.audit_id == audit.id).first()
+
+    findings_count = db.query(AuditFinding).filter(
+        AuditFinding.audit_id == audit.id
+    ).count()
 
     return AuditResponse(
         id=audit.id,
@@ -591,10 +613,85 @@ def trigger_active_audit(model_id: str, db: Session = Depends(get_db)):
         model_id=audit.model_id,
         model_name=model.name,
         audit_type=audit.audit_type,
+
+        scheduled_at=None,
         executed_at=audit.executed_at,
-        execution_status=audit.execution_status,
+
+        execution_status=normalize_execution_status(audit.execution_status),
         audit_result=audit.audit_result,
         summary=AuditSummaryResponse.model_validate(summary) if summary else None,
-        findings_count=len(audit.findings)
+        findings_count=findings_count
     )
 
+
+
+# =========================
+# FRONTEND AUDIT RUN (ALIAS)
+# =========================
+
+@router.post("/audits/run", response_model=AuditResponse, tags=["Audits"])
+def run_audit_from_frontend(payload: dict, db: Session = Depends(get_db)):
+    model_id = payload.get("model_id")
+
+    if not model_id:
+        raise HTTPException(status_code=400, detail="model_id is required")
+
+    model = db.query(AIModel).filter(AIModel.id == model_id).first()
+    if not model:
+        raise HTTPException(status_code=404, detail="Model not found")
+
+    policy = db.query(AuditPolicy).filter(AuditPolicy.model_id == model.id).first()
+    if not policy:
+        raise HTTPException(status_code=404, detail="Audit policy not found")
+
+    engine = AuditEngine(db)
+    audit = engine.run_passive_audit(model, policy)
+
+    summary = db.query(AuditSummary).filter(AuditSummary.audit_id == audit.id).first()
+    findings_count = db.query(AuditFinding).filter(
+        AuditFinding.audit_id == audit.id
+    ).count()
+
+    return AuditResponse(
+        id=audit.id,
+        audit_id=audit.audit_id,
+        model_id=audit.model_id,
+        model_name=model.name,
+        audit_type=audit.audit_type,
+        scheduled_at=audit.scheduled_at,
+        executed_at=audit.executed_at,
+        execution_status=normalize_execution_status(audit.execution_status),
+        audit_result=audit.audit_result,
+        summary=AuditSummaryResponse.model_validate(summary) if summary else None,
+        findings_count=findings_count
+    )
+
+
+from model_executor import ModelExecutor
+
+@router.post("/models/{model_id}/test-connector", tags=["Models"])
+def test_model_connector(model_id: str, db: Session = Depends(get_db)):
+    model = db.query(AIModel).filter(AIModel.model_id == model_id).first()
+    if not model:
+        raise HTTPException(404, "Model not found")
+
+    evidence = (
+        db.query(EvidenceSource)
+        .filter(EvidenceSource.model_id == model.id)
+        .first()
+    )
+
+    if not evidence:
+        raise HTTPException(400, "No evidence source configured")
+
+    executor = ModelExecutor(evidence.config)
+
+    result = executor.execute_active_prompt(
+        "Respond with the word CONNECTED only."
+    )
+
+    return {
+        "status": "SUCCESS",
+        "response": result["raw_response"],
+        "latency": result["latency"]
+    }
