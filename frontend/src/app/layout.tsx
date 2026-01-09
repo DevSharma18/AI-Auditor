@@ -1,21 +1,19 @@
-import type { Metadata } from "next";
 import "./globals.css";
+import { Inter } from "next/font/google";
 
-export const metadata: Metadata = {
-  title: "AI Auditor",
-  description: "AI Model Governance and Compliance Platform",
-};
+const inter = Inter({
+  subsets: ["latin"],
+  weight: ["400", "500", "600", "700"],
+});
 
 export default function RootLayout({
   children,
-}: Readonly<{
+}: {
   children: React.ReactNode;
-}>) {
+}) {
   return (
-    <html lang="en" suppressHydrationWarning>
-      <body className="antialiased">
-        {children}
-      </body>
+    <html lang="en">
+      <body className={inter.className}>{children}</body>
     </html>
   );
 }

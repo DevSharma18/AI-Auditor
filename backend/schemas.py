@@ -179,9 +179,6 @@ class AuditSummaryResponse(BaseModel):
         from_attributes = True
 
 
-from typing import Optional
-from datetime import datetime
-
 class AuditResponse(BaseModel):
     id: int
     audit_id: str
@@ -192,7 +189,6 @@ class AuditResponse(BaseModel):
     execution_status: str
     audit_result: str
     findings_count: int
-
 
 
 # =========================
@@ -207,7 +203,7 @@ class DashboardMetrics(BaseModel):
     critical_findings_count: int
     high_findings_count: int
     overall_risk_score: Optional[float] = None
-    audit_status_distribution: Dict[str, int]
+    audit_status_distribution: Optional[Dict[str, int]] = None
     drift_score_percentage: Optional[float] = None
 
 

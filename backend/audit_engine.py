@@ -1,80 +1,67 @@
 import uuid
 from datetime import datetime
 from typing import Dict, List, Optional
+
 from sqlalchemy.orm import Session
 
-from audit_prompts import ACTIVE_AUDIT_PROMPTS
-from rule_engine.hallucination import HallucinationRule
-
-from models import (
+from .models import (
     AIModel,
     AuditRun,
     AuditSummary,
     AuditFinding,
     AuditPolicy,
     EvidenceSource,
+    AuditInteraction,
 )
 
-from model_executor import ModelExecutor
+from .model_executor import ModelExecutor
+from .audit_prompts import PROMPT_CATEGORIES
+from .audit_prompts.hallucination import HallucinationRule
+from .metrics.hallucination import HallucinationMetric
+from .metrics.bias import BiasMetric
+from .metrics.pii import PIIMetric
+
+
+# =========================
+# CATEGORY NORMALIZATION
+# =========================
+CATEGORY_MAP = {
+    "bias": "bias",
+    "bias_score": "bias",
+    "hallucination": "hallucination",
+    "hallucination_score": "hallucination",
+    "pii": "pii",
+    "pii_score": "pii",
+    "system": "compliance",
+}
 
 
 class AuditEngine:
-    """
-    Core auditing engine.
-    - Passive audits: telemetry / logs (stubbed intentionally)
-    - Active audits: live prompt execution against model endpoint
-    """
-
     def __init__(self, db: Session):
         self.db = db
 
-    # =========================================================
-    # PASSIVE AUDIT (LOGS / METRICS)
-    # =========================================================
+        self.rule_registry = {
+            "hallucination": [HallucinationRule()],
+        }
 
-    def run_passive_audit(
-        self,
-        model: AIModel,
-        policy: AuditPolicy,
-        audit_window_start: Optional[datetime] = None,
-        audit_window_end: Optional[datetime] = None,
-    ) -> AuditRun:
-        audit_id = f"audit_{uuid.uuid4().hex[:12]}"
-
-        evidence_sources = (
-            self.db.query(EvidenceSource)
-            .filter(EvidenceSource.model_id == model.id)
-            .all()
-        )
-
-        if not evidence_sources:
-            return self._create_no_evidence_audit(
-                model,
-                audit_id,
-                "No evidence sources configured",
-            )
-
-        # IMPORTANT:
-        # Passive audits MUST NOT fabricate metrics.
-        # Until ingestion pipeline exists, explicitly return NO_EVIDENCE.
-        return self._create_no_evidence_audit(
-            model,
-            audit_id,
-            "Passive telemetry ingestion not yet enabled",
-        )
+        self.metric_registry = {
+            "hallucination": HallucinationMetric(),
+            "bias": BiasMetric(),
+            "pii": PIIMetric(),
+        }
 
     # =========================================================
-    # ACTIVE AUDIT (LIVE MODEL PROMPTING)
+    # ACTIVE AUDIT
     # =========================================================
-
     def run_active_audit(
         self,
         model: AIModel,
         policy: AuditPolicy,
     ) -> AuditRun:
-        audit_id = f"active_{uuid.uuid4().hex[:12]}"
 
-        evidence_source = (
+        audit_public_id = f"active_{uuid.uuid4().hex[:12]}"
+
+        evidence = (
             self.db.query(EvidenceSource)
             .filter(
                 EvidenceSource.model_id == model.id,
@@ -83,117 +70,157 @@ class AuditEngine:
             .first()
         )
 
-        if not evidence_source:
+        if not evidence:
             return self._create_no_evidence_audit(
-                model,
-                audit_id,
-                "No API connector configured",
+                model, audit_public_id, "No API connector configured"
             )
 
-        # Initialize executor strictly from stored config
-        executor = ModelExecutor(evidence_source.config)
-
-        # Active rules (expand later)
-        rules = [
-            HallucinationRule(),
-            # BiasRule(),
-            # PIIRule(),
-            # ComplianceRule(),
-        ]
+        executor = ModelExecutor(evidence.config)
 
         findings: List[Dict] = []
+        interactions: List[AuditInteraction] = []
+
         prompts_executed = 0
+        total_latency = 0.0
 
-        for category, prompts in ACTIVE_AUDIT_PROMPTS.items():
-            for prompt_def in prompts:
-                prompt_text = prompt_def["prompt"]
+        for category, prompt_defs in PROMPT_CATEGORIES.items():
 
+            rules = self.rule_registry.get(category, [])
+            metric = self.metric_registry.get(category)
+
+            for p in prompt_defs:
                 try:
-                    execution = executor.execute_active_prompt(prompt_text)
+                    execution = executor.execute_active_prompt(p["prompt"])
                     response = execution["raw_response"]
+                    latency = execution["latency"]
+
                     prompts_executed += 1
+                    total_latency += latency
 
                 except Exception as exc:
-                    findings.append(
-                        {
-                            "category": "system",
-                            "rule_id": "EXECUTION_FAILURE",
-                            "severity": "HIGH",
-                            "metric_name": category,
-                            "description": f"Prompt execution failed: {str(exc)}",
-                        }
-                    )
+                    findings.append({
+                        "category": "compliance",
+                        "severity": "HIGH",
+                        "metric_name": "execution_failure",
+                        "description": str(exc),
+                    })
                     continue
 
+                interaction = AuditInteraction(
+                    audit_id=None,
+                    prompt_id=p["id"],
+                    prompt=p["prompt"],
+                    response=response,
+                    latency=round(latency * 1000, 2),
+                )
+
+                self.db.add(interaction)
+                interactions.append(interaction)
+
+                # -------------------------
+                # RULES
+                # -------------------------
                 for rule in rules:
-                    rule_result = rule.evaluate(
-                        prompt=prompt_text,
+                    result = rule.evaluate(
+                        prompt_id=p["id"],
+                        prompt=p["prompt"],
                         response=response,
                     )
+                    if result:
+                        findings.append({
+                            "category": CATEGORY_MAP.get(result.category, result.category),
+                            "severity": result.severity,
+                            "metric_name": result.rule_id,
+                            "description": result.description,
+                        })
 
-                    if rule_result:
-                        findings.append(
-                            {
-                                "category": rule_result.category,
-                                "rule_id": rule_result.rule_id,
-                                "severity": rule_result.severity,
-                                "metric_name": category,
-                                "description": rule_result.description,
-                            }
-                        )
+                # -------------------------
+                # METRICS
+                # -------------------------
+                if metric:
+                    metric_result = metric.evaluate(
+                        prompt=p["prompt"],
+                        response=response,
+                    )
+                    if metric_result:
+                        findings.append({
+                            "category": CATEGORY_MAP.get(metric_result.metric, metric_result.metric),
+                            "severity": metric_result.severity,
+                            "metric_name": metric_result.metric,
+                            "description": metric_result.explanation,
+                        })
+
+        avg_latency = (
+            round(total_latency / prompts_executed, 3)
+            if prompts_executed > 0
+            else None
+        )
 
         return self._persist_active_audit(
-            model=model,
-            audit_id=audit_id,
-            findings=findings,
-            prompts_executed=prompts_executed,
+            model,
+            audit_public_id,
+            findings,
+            interactions,
+            prompts_executed,
+            avg_latency,
         )
 
     # =========================================================
     # PERSISTENCE
     # =========================================================
-
     def _persist_active_audit(
         self,
         model: AIModel,
-        audit_id: str,
+        audit_public_id: str,
         findings: List[Dict],
+        interactions: List[AuditInteraction],
         prompts_executed: int,
+        avg_latency: Optional[float],
     ) -> AuditRun:
+
         critical = sum(1 for f in findings if f["severity"] == "CRITICAL")
         high = sum(1 for f in findings if f["severity"] == "HIGH")
 
-        if critical > 0:
-            result = "AUDIT_FAIL"
-        elif high > 0:
-            result = "AUDIT_WARN"
-        else:
-            result = "AUDIT_PASS"
+        result = (
+            "AUDIT_FAIL"
+            if critical > 0
+            else "AUDIT_WARN"
+            if high > 0
+            else "AUDIT_PASS"
+        )
 
         audit = AuditRun(
-            audit_id=audit_id,
+            audit_id=audit_public_id,
             model_id=model.id,
             audit_type="active",
             executed_at=datetime.utcnow(),
             execution_status="SUCCESS",
             audit_result=result,
         )
+
         self.db.add(audit)
         self.db.flush()
 
-        summary = AuditSummary(
-            audit_id=audit.id,
-            drift_score=None,
-            bias_score=None,
-            risk_score=min((critical * 30 + high * 15), 100),
-            total_findings=len(findings),
-            critical_findings=critical,
-            high_findings=high,
-            metrics_snapshot={
-                "active_prompts_executed": prompts_executed
-            },
+        for interaction in interactions:
+            interaction.audit_id = audit.id
+
+        risk_score = min((critical * 30 + high * 15), 100)
+
+        self.db.add(
+            AuditSummary(
+                audit_id=audit.id,
+                drift_score=None,
+                bias_score=None,
+                risk_score=risk_score,
+                total_findings=len(findings),
+                critical_findings=critical,
+                high_findings=high,
+                metrics_snapshot={
+                    "prompts_executed": prompts_executed,
+                    "avg_latency_seconds": avg_latency,
+                },
+            )
         )
-        self.db.add(summary)
 
         for f in findings:
             self.db.add(
@@ -201,7 +228,6 @@ class AuditEngine:
                     finding_id=f"finding_{uuid.uuid4().hex[:8]}",
                     audit_id=audit.id,
                     category=f["category"],
-                    rule_id=f["rule_id"],
                     severity=f["severity"],
                     metric_name=f["metric_name"],
                     description=f["description"],
@@ -212,23 +238,24 @@ class AuditEngine:
         return audit
 
     # =========================================================
-    # NO-EVIDENCE HANDLER
+    # NO EVIDENCE
     # =========================================================
-
     def _create_no_evidence_audit(
         self,
         model: AIModel,
-        audit_id: str,
+        audit_public_id: str,
         reason: str,
     ) -> AuditRun:
+
         audit = AuditRun(
-            audit_id=audit_id,
+            audit_id=audit_public_id,
             model_id=model.id,
             audit_type="system",
             executed_at=datetime.utcnow(),
             execution_status="SUCCESS",
             audit_result="NO_EVIDENCE",
         )
+
         self.db.add(audit)
         self.db.flush()
 
@@ -249,7 +276,7 @@ class AuditEngine:
             AuditFinding(
                 finding_id=f"finding_{uuid.uuid4().hex[:8]}",
                 audit_id=audit.id,
-                category="system",
+                category="compliance",
                 severity="INFO",
                 metric_name="audit_status",
                 description=reason,

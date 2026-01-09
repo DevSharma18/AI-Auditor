@@ -1,48 +1,66 @@
-import os
 import time
 import requests
 
 class ModelExecutor:
     def __init__(self, config: dict):
-        self.endpoint = config["endpoint"]
-        self.method = config.get("method", "POST")
+        self.provider = config.get("provider")
+        self.model = config.get("model")
+        self.api_key = config.get("api_key")
+        self.base_url = config.get("base_url")
 
-        # Copy headers
-        headers = dict(config.get("headers", {}))
-
-        # 🔑 Resolve OpenAI API key
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise RuntimeError("OPENAI_API_KEY not found in environment")
-
-        # Replace placeholder OR override Authorization
-        headers["Authorization"] = f"Bearer {api_key}"
-        headers.setdefault("Content-Type", "application/json")
-
-        self.headers = headers
-        self.request_template = config.get("request_template", {})
-        self.timeout_seconds = config.get("timeout_seconds", 30)
-        self.session = requests.Session()
-
-    def execute_active_prompt(self, prompt: str):
-        payload = dict(self.request_template)
-        payload["messages"] = [
-            {"role": "user", "content": prompt}
-        ]
-
+    def execute_active_prompt(self, prompt: str) -> dict:
         start = time.time()
-        response = self.session.request(
-            method=self.method,
-            url=self.endpoint,
-            headers=self.headers,
-            json=payload,
-            timeout=self.timeout_seconds,
-        )
+
+        if self.provider == "openai":
+            response = self._openai(prompt)
+
+        elif self.provider == "anthropic":
+            response = self._anthropic(prompt)
+
+        elif self.provider == "local":
+            response = self._local_llm(prompt)
+
+        else:
+            raise ValueError(f"Unsupported provider: {self.provider}")
+
         latency = time.time() - start
 
-        response.raise_for_status()
-
         return {
-            "raw_response": response.json(),
+            "raw_response": response,
             "latency": latency,
         }
+
+    # =========================
+    # PROVIDER IMPLEMENTATIONS
+    # =========================
+
+    def _openai(self, prompt: str) -> str:
+        from openai import OpenAI
+
+        client = OpenAI(api_key=self.api_key)
+
+        r = client.chat.completions.create(
+            model=self.model,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return r.choices[0].message.content
+
+    def _anthropic(self, prompt: str) -> str:
+        import anthropic
+
+        client = anthropic.Anthropic(api_key=self.api_key)
+
+        r = client.messages.create(
+            model=self.model,
+            max_tokens=512,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return r.content[0].text
+
+    def _local_llm(self, prompt: str) -> str:
+        r = requests.post(
+            f"{self.base_url}/api/generate",
+            json={"model": self.model, "prompt": prompt},
+            timeout=60,
+        )
+        return r.json()["response"]

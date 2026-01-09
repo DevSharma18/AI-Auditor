@@ -1,9 +1,19 @@
-from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, ForeignKey, JSON, Enum as SQLEnum
+from sqlalchemy import (
+    Column, Integer, String, Float, Boolean,
+    DateTime, ForeignKey, JSON
+)
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
 
-from database import Base
+from .database import Base
+
+
+
+
+# =========================
+# ENUMS (UNCHANGED)
+# =========================
 
 class ModelType(str, enum.Enum):
     LLM = "llm"
@@ -41,20 +51,6 @@ class AuditType(str, enum.Enum):
     PASSIVE = "passive"
     ACTIVE = "active"
 
-class Severity(str, enum.Enum):
-    LOW = "LOW"
-    MEDIUM = "MEDIUM"
-    HIGH = "HIGH"
-    CRITICAL = "CRITICAL"
-
-class FindingCategory(str, enum.Enum):
-    DRIFT = "drift"
-    BIAS = "bias"
-    RISK = "risk"
-    COMPLIANCE = "compliance"
-    SECURITY = "security"
-    SYSTEM = "system"
-
 class FindingSeverity(str, enum.Enum):
     INFO = "INFO"
     LOW = "LOW"
@@ -63,116 +59,189 @@ class FindingSeverity(str, enum.Enum):
     CRITICAL = "CRITICAL"
 
 
+# =========================
+# CORE MODEL
+# =========================
+
 class AIModel(Base):
     __tablename__ = "ai_models"
 
     id = Column(Integer, primary_key=True, index=True)
+
+    # frontend-visible ID
     model_id = Column(String, unique=True, index=True, nullable=False)
+
     name = Column(String, nullable=False)
     version = Column(String, default="1.0")
-    model_type = Column(String, default="llm")
-    connection_type = Column(String, default="api")
+
+    # 🔑 REQUIRED for frontend + future providers
+    model_type = Column(String, default="llm")           # llm / ml / vision
+    connection_type = Column(String, default="api")      # api / logs / batch
+
+    description = Column(String, nullable=True)
+    is_active = Column(Boolean, default=True)
+
     created_at = Column(DateTime, default=datetime.utcnow)
 
-    evidence_sources = relationship("EvidenceSource", back_populates="model", cascade="all, delete-orphan")
-    audit_policies = relationship("AuditPolicy", back_populates="model", cascade="all, delete-orphan")
-    audit_runs = relationship("AuditRun", back_populates="model", cascade="all, delete-orphan")
+    # relationships
+    evidence_sources = relationship(
+        "EvidenceSource",
+        back_populates="model",
+        cascade="all, delete-orphan"
+    )
 
+    audit_policies = relationship(
+        "AuditPolicy",
+        back_populates="model",
+        cascade="all, delete-orphan"
+    )
+
+    audit_runs = relationship(
+        "AuditRun",
+        back_populates="model",
+        cascade="all, delete-orphan"
+    )
+
+
+# =========================
+# EVIDENCE / CONNECTOR
+# =========================
 
 class EvidenceSource(Base):
     __tablename__ = "evidence_sources"
 
     id = Column(Integer, primary_key=True, index=True)
     model_id = Column(Integer, ForeignKey("ai_models.id"), nullable=False)
-    source_type = Column(String, nullable=False)
+
+    source_type = Column(String, default="api")
     config = Column(JSON, default={})
+
     read_only = Column(Boolean, default=True)
+
     last_data_snapshot = Column(JSON, nullable=True)
     last_fetch_at = Column(DateTime, nullable=True)
 
     model = relationship("AIModel", back_populates="evidence_sources")
 
 
+# =========================
+# AUDIT POLICY
+# =========================
+
 class AuditPolicy(Base):
     __tablename__ = "audit_policies"
 
     id = Column(Integer, primary_key=True, index=True)
     model_id = Column(Integer, ForeignKey("ai_models.id"), nullable=False)
+
     audit_frequency = Column(String, default="daily")
     baseline_strategy = Column(String, default="previous_audit")
-    audit_scope = Column(JSON, default={"drift": True, "bias": True, "risk": True, "compliance": True, "active_security": False})
+
+    audit_scope = Column(
+        JSON,
+        default={
+            "drift": True,
+            "bias": True,
+            "risk": True,
+            "compliance": True,
+            "active_security": False
+        }
+    )
+
     policy_reference = Column(JSON, default={})
     active_audit_enabled = Column(Boolean, default=False)
+
     last_run_at = Column(DateTime, nullable=True)
 
     model = relationship("AIModel", back_populates="audit_policies")
 
+
+# =========================
+# AUDIT RUN
+# =========================
 
 class AuditRun(Base):
     __tablename__ = "audit_runs"
 
     id = Column(Integer, primary_key=True, index=True)
     audit_id = Column(String, unique=True, index=True, nullable=False)
+
     model_id = Column(Integer, ForeignKey("ai_models.id"), nullable=False)
+
     audit_type = Column(String, default="passive")
     scheduled_at = Column(DateTime, nullable=True)
     executed_at = Column(DateTime, default=datetime.utcnow)
+
     execution_status = Column(String, default="SUCCESS")
     audit_result = Column(String, default="AUDIT_PASS")
 
     model = relationship("AIModel", back_populates="audit_runs")
-    summary = relationship("AuditSummary", back_populates="audit_run", uselist=False, cascade="all, delete-orphan")
-    findings = relationship("AuditFinding", back_populates="audit_run", cascade="all, delete-orphan")
+    summary = relationship(
+        "AuditSummary",
+        back_populates="audit_run",
+        uselist=False,
+        cascade="all, delete-orphan"
+    )
+    findings = relationship(
+        "AuditFinding",
+        back_populates="audit_run",
+        cascade="all, delete-orphan"
+    )
 
+
+# =========================
+# AUDIT SUMMARY
+# =========================
 
 class AuditSummary(Base):
     __tablename__ = "audit_summaries"
 
     id = Column(Integer, primary_key=True, index=True)
     audit_id = Column(Integer, ForeignKey("audit_runs.id"), nullable=False)
+
     drift_score = Column(Float, nullable=True)
     bias_score = Column(Float, nullable=True)
     risk_score = Column(Float, nullable=True)
+
     total_findings = Column(Integer, default=0)
     critical_findings = Column(Integer, default=0)
     high_findings = Column(Integer, default=0)
+
     metrics_snapshot = Column(JSON, nullable=True)
 
     audit_run = relationship("AuditRun", back_populates="summary")
 
+
+# =========================
+# FINDINGS
+# =========================
 
 class AuditFinding(Base):
     __tablename__ = "audit_findings"
 
     id = Column(Integer, primary_key=True, index=True)
     finding_id = Column(String, unique=True, index=True, nullable=False)
+
     audit_id = Column(Integer, ForeignKey("audit_runs.id"), nullable=False)
+
     category = Column(String, nullable=False)
     rule_id = Column(String, nullable=True)
+
     severity = Column(String, default="MEDIUM")
+
     metric_name = Column(String, nullable=False)
     baseline_value = Column(Float, nullable=True)
     current_value = Column(Float, nullable=True)
     deviation_percentage = Column(Float, default=0.0)
+
     description = Column(String, nullable=True)
 
     audit_run = relationship("AuditRun", back_populates="findings")
 
-class ModelConnector(Base):
-    __tablename__ = "model_connectors"
 
-    id = Column(Integer, primary_key=True)
-    model_id = Column(Integer, ForeignKey("ai_models.id"), nullable=False)
-
-    endpoint = Column(String, nullable=False)
-    method = Column(String, default="POST")
-    headers = Column(JSON, default={})
-    request_template = Column(JSON, nullable=False)
-
-    response_path = Column(String, nullable=True)
-    timeout_seconds = Column(Integer, default=30)
-
-    model = relationship("AIModel", backref="connector")
+# =========================
+# PROMPT TESTS (ACTIVE AUDIT)
+# =========================
 
 class PromptTest(Base):
     __tablename__ = "prompt_tests"
@@ -186,3 +255,20 @@ class PromptTest(Base):
 
     model = relationship("AIModel", backref="prompt_tests")
 
+from sqlalchemy import Text, Float, DateTime, ForeignKey
+from datetime import datetime
+
+class AuditInteraction(Base):
+    __tablename__ = "audit_interactions"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    # FK to audit_runs.id
+    audit_id = Column(Integer, ForeignKey("audit_runs.id"), index=True, nullable=True)
+
+    prompt_id = Column(String, nullable=False)
+    prompt = Column(Text, nullable=False)
+    response = Column(Text, nullable=False)
+
+    latency = Column(Float)
+    created_at = Column(DateTime, default=datetime.utcnow)
