@@ -1,66 +1,78 @@
 import time
 import requests
+import json
+from typing import Dict, Any
+
 
 class ModelExecutor:
-    def __init__(self, config: dict):
-        self.provider = config.get("provider")
-        self.model = config.get("model")
-        self.api_key = config.get("api_key")
-        self.base_url = config.get("base_url")
+    """
+    Provider-agnostic executor.
+    Executes exactly what connector config defines.
+    """
 
-    def execute_active_prompt(self, prompt: str) -> dict:
+    def __init__(self, config: Dict[str, Any]):
+        self.endpoint = config.get("endpoint")
+        self.method = config.get("method", "POST")
+        self.headers_template = config.get("headers", {})
+        self.request_template = config.get("request_template")
+        self.response_path = config.get("response_path")
+
+        if not self.endpoint or not self.request_template or not self.response_path:
+            raise ValueError("Invalid execution contract")
+
+    def execute_active_prompt(self, prompt: str) -> Dict[str, Any]:
         start = time.time()
 
-        if self.provider == "openai":
-            response = self._openai(prompt)
+        headers = {
+            k: v.replace("{{PROMPT}}", prompt)
+            for k, v in self.headers_template.items()
+        }
 
-        elif self.provider == "anthropic":
-            response = self._anthropic(prompt)
+        payload = json.loads(json.dumps(self.request_template))
+        payload = self._inject_prompt(payload, prompt)
 
-        elif self.provider == "local":
-            response = self._local_llm(prompt)
+        print("EXECUTING REQUEST >>>", self.endpoint)
+        print("PAYLOAD >>>", json.dumps(payload)[:500])
 
-        else:
-            raise ValueError(f"Unsupported provider: {self.provider}")
+        response = requests.request(
+            method=self.method,
+            url=self.endpoint,
+            headers=headers,
+            json=payload,
+            timeout=60,
+        )
 
         latency = time.time() - start
 
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"Model request failed: {response.status_code} {response.text}"
+            )
+
+        raw_json = response.json()
+        content = self._extract_response(raw_json)
+
         return {
-            "raw_response": response,
+            "raw_response": raw_json,
+            "content": content,
             "latency": latency,
         }
 
-    # =========================
-    # PROVIDER IMPLEMENTATIONS
-    # =========================
+    def _inject_prompt(self, obj, prompt: str):
+        if isinstance(obj, dict):
+            return {k: self._inject_prompt(v, prompt) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [self._inject_prompt(i, prompt) for i in obj]
+        if isinstance(obj, str):
+            return obj.replace("{{PROMPT}}", prompt)
+        return obj
 
-    def _openai(self, prompt: str) -> str:
-        from openai import OpenAI
-
-        client = OpenAI(api_key=self.api_key)
-
-        r = client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return r.choices[0].message.content
-
-    def _anthropic(self, prompt: str) -> str:
-        import anthropic
-
-        client = anthropic.Anthropic(api_key=self.api_key)
-
-        r = client.messages.create(
-            model=self.model,
-            max_tokens=512,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return r.content[0].text
-
-    def _local_llm(self, prompt: str) -> str:
-        r = requests.post(
-            f"{self.base_url}/api/generate",
-            json={"model": self.model, "prompt": prompt},
-            timeout=60,
-        )
-        return r.json()["response"]
+    def _extract_response(self, data: dict):
+        current = data
+        for part in self.response_path.replace("]", "").split("."):
+            if "[" in part:
+                key, index = part.split("[")
+                current = current[key][int(index)]
+            else:
+                current = current[part]
+        return current

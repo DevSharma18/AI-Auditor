@@ -16,13 +16,10 @@ export default function BiasPage() {
         fetch(`${API_BASE}/metrics/bias`)
             .then(res => res.json())
             .then(data => {
-                console.log('Bias metrics:', data);
-
                 setTotalModelsAnalyzed(data.totalModelsAnalyzed);
                 setModelsWithBias(data.modelsWithBias);
                 setTotalBiasIssues(data.totalBiasIssues);
 
-                // PieChart expects { name, value }
                 setBiasDistributionData(
                     data.biasDistribution.map((d: any) => ({
                         name: d.label,
@@ -36,20 +33,16 @@ export default function BiasPage() {
                         value: d.value,
                     }))
                 );
-            })
-            .catch(err => {
-                console.error('Bias fetch failed', err);
             });
     }, []);
 
-    const distributionColors = ['#dc2626', '#f97316', '#fbbf24', '#84cc16'];
-    const severityColors = ['#dc2626', '#f97316', '#fbbf24', '#84cc16'];
+    const colors = ['#dc2626', '#f97316', '#fbbf24', '#84cc16'];
 
     return (
-        <div style={{ minHeight: '100vh', background: '#ffffff' }}>
+        <div>
             <h1 style={{ fontSize: 28, fontWeight: 700 }}>Bias Detection & Analysis</h1>
 
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 24, margin: '32px 0' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 24, margin: '32px 0' }}>
                 <MetricCard title="Total Models Analyzed" value={totalModelsAnalyzed} />
                 <MetricCard title="Models With Bias" value={modelsWithBias} />
                 <MetricCard title="Total Bias Issues" value={totalBiasIssues} />
@@ -57,17 +50,10 @@ export default function BiasPage() {
 
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24 }}>
                 <ChartCard title="Bias Distribution">
-                    <PieChart
-                        data={biasDistributionData}
-                        colors={distributionColors}
-                    />
+                    <PieChart data={biasDistributionData} colors={colors} />
                 </ChartCard>
-
                 <ChartCard title="Bias Severity">
-                    <PieChart
-                        data={biasSeverityData}
-                        colors={severityColors}
-                    />
+                    <PieChart data={biasSeverityData} colors={colors} />
                 </ChartCard>
             </div>
         </div>
@@ -86,7 +72,7 @@ function MetricCard({ title, value }: any) {
 function ChartCard({ title, children }: any) {
     return (
         <div style={{ border: '2px solid #e5e7eb', padding: 24 }}>
-            <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 16 }}>{title}</h3>
+            <h3 style={{ fontSize: 16, fontWeight: 600 }}>{title}</h3>
             {children}
         </div>
     );
