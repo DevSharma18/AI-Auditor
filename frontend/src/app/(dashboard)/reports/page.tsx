@@ -1,14 +1,18 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { apiGet, apiPost, apiGetBlob } from '@/lib/api-client';
 
-const API_BASE = 'http://127.0.0.1:8000/api';
+/* =========================
+   TYPES
+========================= */
 
 type Model = {
     id: number;
     model_id: string;
     name: string;
-    version: string;
+    version?: string;
 };
 
 type Audit = {
@@ -17,99 +21,140 @@ type Audit = {
     executed_at: string;
 };
 
-const auditCategories = ['Bias', 'Hallucination', 'PII', 'Compliance', 'Drift'];
+/* =========================
+   PAGE
+========================= */
 
-export default function AuditsPage() {
+export default function ReportsPage() {
+    const router = useRouter();
+
     const [activeTab, setActiveTab] = useState<'model' | 'log'>('model');
 
-    // Live data
+    // live data
     const [models, setModels] = useState<Model[]>([]);
     const [audits, setAudits] = useState<Audit[]>([]);
 
-    // State
+    // state
     const [selectedModel, setSelectedModel] = useState('');
-    const [iterations, setIterations] = useState('10');
-    const [loading, setLoading] = useState(false);
+    const [loadingModels, setLoadingModels] = useState(true);
+    const [loadingAudits, setLoadingAudits] = useState(false);
+    const [runningAudit, setRunningAudit] = useState(false);
+    const [downloadingAuditId, setDownloadingAuditId] = useState<string | null>(null);
 
-    // Passive audit state
-    const [uploadedFile, setUploadedFile] = useState<File | null>(null);
-    const [samplingRate, setSamplingRate] = useState('100');
+    const [modelsError, setModelsError] = useState<string | null>(null);
+    const [auditsError, setAuditsError] = useState<string | null>(null);
 
     /* =========================
        LOAD MODELS
     ========================= */
+    async function fetchModels() {
+        try {
+            setModelsError(null);
+            setLoadingModels(true);
+
+            const data = await apiGet<Model[]>('/models');
+            setModels(Array.isArray(data) ? data : []);
+        } catch (err: any) {
+            setModels([]);
+            setModelsError(err?.message || 'Failed to load models');
+        } finally {
+            setLoadingModels(false);
+        }
+    }
 
     useEffect(() => {
         fetchModels();
     }, []);
 
-    const fetchModels = async () => {
-        const res = await fetch(`${API_BASE}/models`);
-        const data = await res.json();
-        setModels(data);
-    };
-
     /* =========================
-       LOAD AUDITS
+       LOAD AUDITS FOR MODEL
     ========================= */
-
-    const fetchAudits = async (modelId: string) => {
-        const res = await fetch(`${API_BASE}/audits/model/${modelId}/recent`);
-        if (res.ok) {
-            const data = await res.json();
-            setAudits(data);
+    async function loadAudits(modelId: string) {
+        if (!modelId) {
+            setAudits([]);
+            return;
         }
-    };
+
+        try {
+            setAuditsError(null);
+            setLoadingAudits(true);
+
+            const data = await apiGet<Audit[]>(`/audits/model/${modelId}/recent`);
+            setAudits(Array.isArray(data) ? data : []);
+        } catch (err: any) {
+            setAudits([]);
+            setAuditsError(err?.message || 'Failed to load audits');
+        } finally {
+            setLoadingAudits(false);
+        }
+    }
+
+    useEffect(() => {
+        if (selectedModel) loadAudits(selectedModel);
+    }, [selectedModel]);
 
     /* =========================
-       START MODEL AUDIT
+       RUN AUDIT
     ========================= */
-
-    const startModelAudit = async () => {
+    async function runAudit() {
         if (!selectedModel) {
             alert('Please select a model');
             return;
         }
 
-        setLoading(true);
+        try {
+            setRunningAudit(true);
+            await apiPost(`/audits/model/${selectedModel}/run`);
 
-        const res = await fetch(
-            `${API_BASE}/audits/model/${selectedModel}?iterations=${iterations}`,
-            { method: 'POST' }
-        );
-
-        if (!res.ok) {
-            alert('Audit failed');
-            setLoading(false);
-            return;
+            await loadAudits(selectedModel);
+            await fetchModels();
+        } catch (err: any) {
+            alert(`Audit failed: ${err?.message || 'Unknown error'}`);
+        } finally {
+            setRunningAudit(false);
         }
-
-        await fetchAudits(selectedModel);
-        setLoading(false);
-    };
+    }
 
     /* =========================
-       FILE UPLOAD (LOG AUDIT)
+       DOWNLOAD REPORT
     ========================= */
+    async function downloadAuditReport(auditId: string) {
+        try {
+            setDownloadingAuditId(auditId);
 
-    const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-        if (e.target.files && e.target.files[0]) {
-            setUploadedFile(e.target.files[0]);
+            const blob = await apiGetBlob(`/audits/${auditId}/download`);
+
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `${auditId}.json`;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            window.URL.revokeObjectURL(url);
+        } catch (err: any) {
+            alert(`Download failed: ${err?.message || 'Unknown error'}`);
+        } finally {
+            setDownloadingAuditId(null);
         }
-    };
+    }
+
+    /* =========================
+       UI
+    ========================= */
 
     return (
         <div style={{ background: '#fafafa', minHeight: '100vh' }}>
             {/* Header */}
-            <div style={{ marginBottom: 32, paddingBottom: 16, borderBottom: '2px solid #e5e7eb' }}>
-                <h1 style={{ fontSize: 28, fontWeight: 700, margin: 0 }}>Audits</h1>
-                <p style={{ fontSize: 14, color: '#666', marginTop: 8 }}>
-                    Perform model auditing on custom models or log auditing on ingested logs
+            <div style={header}>
+                <h1 style={title}>Audits</h1>
+                <p style={subtitle}>
+                    Run and review model audits (prompt/response evidence stored in database)
                 </p>
             </div>
 
             {/* Tabs */}
-            <div style={{ display: 'flex', gap: 8, marginBottom: 32, borderBottom: '2px solid #e5e7eb' }}>
+            <div style={tabs}>
                 <button style={tab(activeTab === 'model')} onClick={() => setActiveTab('model')}>
                     Model Auditing
                 </button>
@@ -119,146 +164,133 @@ export default function AuditsPage() {
             </div>
 
             {/* =========================
-               MODEL AUDITING
-            ========================= */}
-
+         MODEL AUDITING
+      ========================= */}
             {activeTab === 'model' && (
-                <div>
+                <>
                     <div style={card}>
                         <h2 style={sectionTitle}>Configure Model Audit</h2>
 
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24 }}>
-                            {/* Left */}
-                            <div>
-                                <label style={label}>
-                                    Select Model <span style={{ color: '#ef4444' }}>*</span>
-                                </label>
-                                <select
-                                    value={selectedModel}
-                                    onChange={e => {
-                                        setSelectedModel(e.target.value);
-                                        fetchAudits(e.target.value);
-                                    }}
-                                    style={input}
-                                >
-                                    <option value="">Choose a custom model</option>
-                                    {models.map(m => (
-                                        <option key={m.id} value={m.model_id}>
-                                            {m.name} ({m.version})
-                                        </option>
-                                    ))}
-                                </select>
+                        <label style={label}>
+                            Select Model <span style={{ color: '#ef4444' }}>*</span>
+                        </label>
 
-                                <div style={{ marginTop: 24 }}>
-                                    <label style={label}>Number of Test Iterations</label>
-                                    <input
-                                        type="number"
-                                        min="1"
-                                        max="1000"
-                                        value={iterations}
-                                        onChange={e => setIterations(e.target.value)}
-                                        style={input}
-                                    />
-                                </div>
+                        <select
+                            value={selectedModel}
+                            onChange={(e) => setSelectedModel(e.target.value)}
+                            style={input}
+                            disabled={loadingModels}
+                        >
+                            <option value="">
+                                {loadingModels ? 'Loading models…' : 'Choose a model'}
+                            </option>
+                            {models.map((m) => (
+                                <option key={m.id} value={m.model_id}>
+                                    {m.name} ({m.model_id})
+                                </option>
+                            ))}
+                        </select>
 
-                                <div style={{ marginTop: 24 }}>
-                                    <label style={label}>Audit Categories</label>
-                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                                        {auditCategories.map(cat => (
-                                            <div key={cat} style={categoryTag}>
-                                                {cat}
-                                            </div>
-                                        ))}
-                                    </div>
-                                </div>
+                        {modelsError && (
+                            <div style={{ marginTop: 12, color: '#b91c1c', fontSize: 13 }}>
+                                {modelsError}
                             </div>
+                        )}
 
-                            {/* Right */}
-                            <div>
-                                <label style={label}>Autonomous Audit</label>
-                                <div style={infoBox}>
-                                    This audit runs <b>platform-controlled prompts (700+)</b> across
-                                    hallucination, bias, PII, compliance, and drift.
-                                    <br /><br />
-                                    Prompts are not user-provided to preserve audit integrity.
-                                </div>
-                            </div>
-                        </div>
-
-                        <div style={{ marginTop: 32, display: 'flex', justifyContent: 'flex-end' }}>
+                        <div style={{ marginTop: 24, textAlign: 'right' }}>
                             <button
-                                onClick={startModelAudit}
-                                disabled={loading}
-                                style={primaryBtn}
+                                onClick={runAudit}
+                                disabled={!selectedModel || runningAudit}
+                                style={{
+                                    ...primaryBtn,
+                                    opacity: !selectedModel || runningAudit ? 0.6 : 1,
+                                    cursor: !selectedModel || runningAudit ? 'not-allowed' : 'pointer',
+                                }}
                             >
-                                {loading ? 'Running Audit…' : 'Start Model Audit'}
+                                {runningAudit ? 'Running Audit…' : 'Start Model Audit'}
                             </button>
                         </div>
                     </div>
 
-                    {/* Results */}
-                    <div>
-                        <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 16 }}>
-                            Recent Model Audits
-                        </h3>
+                    {/* =========================
+             RECENT AUDITS (REAL DB)
+          ========================= */}
+                    <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 16 }}>
+                        Recent Model Audits
+                    </h3>
 
-                        {audits.length === 0 ? (
-                            <div style={emptyBox}>
-                                <p>No model audits yet.</p>
+                    {!selectedModel ? (
+                        <div style={emptyBox}>Select a model to view audit history.</div>
+                    ) : loadingAudits ? (
+                        <div style={emptyBox}>Loading audits…</div>
+                    ) : auditsError ? (
+                        <div style={emptyBox}>
+                            <div style={{ color: '#b91c1c', fontWeight: 700, marginBottom: 6 }}>
+                                Failed to load audits
                             </div>
-                        ) : (
-                            <div style={card}>
-                                {audits.map(a => (
-                                    <div
-                                        key={a.audit_id}
-                                        style={{
-                                            display: 'flex',
-                                            justifyContent: 'space-between',
-                                            padding: '12px 0',
-                                            borderBottom: '1px solid #e5e7eb',
-                                        }}
-                                    >
-                                        <span>{a.audit_id}</span>
-                                        <span>{a.audit_result}</span>
-                                        <span>{new Date(a.executed_at).toLocaleString()}</span>
+                            <div style={{ color: '#6b7280', fontSize: 13 }}>{auditsError}</div>
+                        </div>
+                    ) : audits.length === 0 ? (
+                        <div style={emptyBox}>
+                            No audits found for this model yet.
+                            <br />
+                            Run an audit to generate evidence.
+                        </div>
+                    ) : (
+                        <div style={card}>
+                            <div style={auditHeaderRow}>
+                                <div style={{ fontWeight: 700 }}>Audit ID</div>
+                                <div style={{ fontWeight: 700, textAlign: 'center' }}>Result</div>
+                                <div style={{ fontWeight: 700, textAlign: 'right' }}>Executed</div>
+                                <div style={{ fontWeight: 700, textAlign: 'right' }}>Actions</div>
+                            </div>
+
+                            {audits.map((a) => (
+                                <div
+                                    key={a.audit_id}
+                                    style={auditRow}
+                                    onClick={() => router.push(`/reports/auditId/${a.audit_id}`)}
+                                >
+                                    <div style={{ fontFamily: 'monospace', fontSize: 13 }}>{a.audit_id}</div>
+
+                                    <div style={{ textAlign: 'center' }}>
+                                        <span style={badge(a.audit_result)}>{a.audit_result}</span>
                                     </div>
-                                ))}
-                            </div>
-                        )}
-                    </div>
-                </div>
+
+                                    <div style={{ textAlign: 'right', fontSize: 13, color: '#6b7280' }}>
+                                        {new Date(a.executed_at).toLocaleString()}
+                                    </div>
+
+                                    <div style={{ textAlign: 'right' }}>
+                                        <button
+                                            style={{
+                                                ...smallBtn,
+                                                opacity: downloadingAuditId === a.audit_id ? 0.6 : 1,
+                                                cursor: downloadingAuditId === a.audit_id ? 'not-allowed' : 'pointer',
+                                            }}
+                                            disabled={downloadingAuditId === a.audit_id}
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                downloadAuditReport(a.audit_id);
+                                            }}
+                                        >
+                                            {downloadingAuditId === a.audit_id ? 'Downloading…' : 'Download'}
+                                        </button>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </>
             )}
 
             {/* =========================
-               LOG AUDITING
-            ========================= */}
-
+         LOG AUDITING (PLACEHOLDER)
+      ========================= */}
             {activeTab === 'log' && (
-                <div>
-                    <div style={card}>
-                        <h2 style={sectionTitle}>Configure Log Audit</h2>
-
-                        <label style={label}>
-                            Upload Log File <span style={{ color: '#ef4444' }}>*</span>
-                        </label>
-                        <input type="file" onChange={handleFileUpload} />
-
-                        <div style={{ marginTop: 24 }}>
-                            <label style={label}>Sampling Rate (%)</label>
-                            <input
-                                type="number"
-                                min="1"
-                                max="100"
-                                value={samplingRate}
-                                onChange={e => setSamplingRate(e.target.value)}
-                                style={input}
-                            />
-                        </div>
-
-                        <div style={{ marginTop: 32, display: 'flex', justifyContent: 'flex-end' }}>
-                            <button style={primaryBtn}>Process Logs</button>
-                        </div>
-                    </div>
+                <div style={card}>
+                    <h2 style={sectionTitle}>Log Auditing</h2>
+                    <p style={{ fontSize: 14, color: '#666' }}>Log auditing will be enabled in Phase 2.</p>
                 </div>
             )}
         </div>
@@ -268,6 +300,42 @@ export default function AuditsPage() {
 /* =========================
    STYLES
 ========================= */
+
+const header = {
+    marginBottom: 32,
+    paddingBottom: 16,
+    borderBottom: '2px solid #e5e7eb',
+};
+
+const title = {
+    fontSize: 28,
+    fontWeight: 700,
+};
+
+const subtitle = {
+    fontSize: 14,
+    color: '#666',
+    marginTop: 8,
+};
+
+const tabs = {
+    display: 'flex',
+    gap: 8,
+    marginBottom: 32,
+    borderBottom: '2px solid #e5e7eb',
+};
+
+const tab = (active: boolean) => ({
+    padding: '12px 24px',
+    background: active ? '#1a1a1a' : 'transparent',
+    color: active ? '#ffffff' : '#666666',
+    border: 'none',
+    fontSize: 14,
+    fontWeight: 600,
+    cursor: 'pointer',
+    borderBottom: active ? '2px solid #1a1a1a' : '2px solid transparent',
+    marginBottom: -2,
+});
 
 const card = {
     background: '#ffffff',
@@ -303,27 +371,16 @@ const primaryBtn = {
     border: 'none',
     fontSize: 14,
     fontWeight: 600,
-    cursor: 'pointer',
 };
 
-const tab = (active: boolean) => ({
-    padding: '12px 24px',
-    background: active ? '#1a1a1a' : 'transparent',
-    color: active ? '#ffffff' : '#666666',
+const smallBtn = {
+    padding: '8px 12px',
+    background: '#111827',
+    color: '#ffffff',
     border: 'none',
-    fontSize: 14,
-    fontWeight: 600,
-    cursor: 'pointer',
-    borderBottom: active ? '2px solid #1a1a1a' : '2px solid transparent',
-    marginBottom: -2,
-});
-
-const infoBox = {
-    background: '#f0f9ff',
-    border: '1px solid #bae6fd',
-    padding: 16,
-    fontSize: 13,
-    color: '#075985',
+    fontSize: 12,
+    fontWeight: 700,
+    borderRadius: 6,
 };
 
 const emptyBox = {
@@ -334,9 +391,48 @@ const emptyBox = {
     color: '#666666',
 };
 
-const categoryTag = {
-    padding: '8px 16px',
-    border: '1px solid #d1d5db',
+const auditHeaderRow = {
+    display: 'grid',
+    gridTemplateColumns: '1fr 140px 220px 140px',
+    gap: 12,
+    paddingBottom: 12,
+    borderBottom: '2px solid #e5e7eb',
+    marginBottom: 8,
     fontSize: 13,
-    color: '#666666',
+    color: '#111827',
+};
+
+const auditRow = {
+    display: 'grid',
+    gridTemplateColumns: '1fr 140px 220px 140px',
+    gap: 12,
+    padding: '12px 0',
+    borderBottom: '1px solid #e5e7eb',
+    cursor: 'pointer',
+};
+
+const badge = (result: string) => {
+    let bg = '#e5e7eb';
+    let color = '#111827';
+
+    if (result === 'AUDIT_PASS') {
+        bg = '#dcfce7';
+        color = '#166534';
+    } else if (result === 'AUDIT_WARN') {
+        bg = '#ffedd5';
+        color = '#9a3412';
+    } else if (result === 'AUDIT_FAIL') {
+        bg = '#fee2e2';
+        color = '#991b1b';
+    }
+
+    return {
+        display: 'inline-block',
+        padding: '6px 10px',
+        fontSize: 12,
+        fontWeight: 700,
+        background: bg,
+        color,
+        borderRadius: 6,
+    } as const;
 };
