@@ -8,25 +8,6 @@ from enum import Enum
 # ENUMS
 # =========================
 
-class ModelType(str, Enum):
-    LLM = "llm"
-    ML = "ml"
-
-
-class ConnectionType(str, Enum):
-    API = "api"
-    LOGS = "logs"
-    BATCH = "batch"
-    CONTAINER = "container"
-    SAMPLE = "sample"
-
-
-class AuditFrequency(str, Enum):
-    DAILY = "daily"
-    WEEKLY = "weekly"
-    MONTHLY = "monthly"
-
-
 class ExecutionStatus(str, Enum):
     SUCCESS = "SUCCESS"
     PARTIAL = "PARTIAL"
@@ -37,16 +18,7 @@ class AuditResultEnum(str, Enum):
     AUDIT_PASS = "AUDIT_PASS"
     AUDIT_WARN = "AUDIT_WARN"
     AUDIT_FAIL = "AUDIT_FAIL"
-    BASELINE_CREATED = "BASELINE_CREATED"
     NO_EVIDENCE = "NO_EVIDENCE"
-
-
-class Severity(str, Enum):
-    INFO = "INFO"
-    LOW = "LOW"
-    MEDIUM = "MEDIUM"
-    HIGH = "HIGH"
-    CRITICAL = "CRITICAL"
 
 
 # =========================
@@ -59,12 +31,13 @@ class RegisterModelRequest(BaseModel):
 
     endpoint: str
     method: Optional[str] = "POST"
+
     headers: Dict[str, str]
 
-    # 🔑 FULL PROVIDER-SPECIFIC BODY TEMPLATE
+    # 🔑 PROVIDER-SPECIFIC FULL PAYLOAD TEMPLATE
     request_template: Dict[str, Any]
 
-    # 🔑 RESPONSE EXTRACTION PATH (e.g. choices[0].message.content)
+    # 🔑 RESPONSE EXTRACTION PATH
     response_path: str
 
 
@@ -83,10 +56,6 @@ class ModelResponse(BaseModel):
     class Config:
         from_attributes = True
 
-
-# =========================
-# AUDIT RESPONSE
-# =========================
 
 class AuditResponse(BaseModel):
     id: int

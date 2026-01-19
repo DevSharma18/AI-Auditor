@@ -53,13 +53,19 @@ export default function Sidebar() {
                             <Link href="/bias" style={navItem(isActive('/bias'))}>
                                 Bias
                             </Link>
-                            <Link href="/hallucination" style={navItem(isActive('/hallucination'))}>
+                            <Link
+                                href="/hallucination"
+                                style={navItem(isActive('/hallucination'))}
+                            >
                                 Hallucination
                             </Link>
                             <Link href="/pii" style={navItem(isActive('/pii'))}>
                                 PII
                             </Link>
-                            <Link href="/compliance" style={navItem(isActive('/compliance'))}>
+                            <Link
+                                href="/compliance"
+                                style={navItem(isActive('/compliance'))}
+                            >
                                 Compliance
                             </Link>
                             <Link href="/drift" style={navItem(isActive('/drift'))}>
@@ -69,6 +75,14 @@ export default function Sidebar() {
                     )}
                 </div>
 
+                {/* ✅ NEW: Executive Reports page below Metrics */}
+                <Link
+                    href="/executive-reports"
+                    style={navItem(isActive('/executive-reports'))}
+                >
+                    Executive Reports
+                </Link>
+
                 <Link
                     href="/model-manager"
                     style={navItem(isActive('/model-manager'))}
@@ -76,7 +90,7 @@ export default function Sidebar() {
                     Model Manager
                 </Link>
 
-                {/* ✅ FIX: REPORTS IS YOUR AUDITS */}
+                {/* ✅ Reports is your audits page */}
                 <Link href="/reports" style={navItem(isActive('/reports'))}>
                     Audits
                 </Link>

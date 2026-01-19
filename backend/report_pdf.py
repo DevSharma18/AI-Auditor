@@ -1,0 +1,164 @@
+from __future__ import annotations
+
+from typing import Dict, Any, List
+from datetime import datetime
+from jinja2 import Template
+
+from .remediation_playbook import explain_category, remediation_steps
+
+HTML_TEMPLATE = """
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>AI Auditor Report</title>
+  <style>
+    body { font-family: Arial, sans-serif; font-size: 12px; color: #111827; margin: 24px; line-height: 1.5; }
+    .header { border-bottom: 2px solid #e5e7eb; padding-bottom: 12px; margin-bottom: 18px; }
+    .title { font-size: 20px; font-weight: 700; margin: 0; }
+    .subtitle { font-size: 12px; color: #6b7280; margin: 4px 0 0 0; }
+    .section { margin-top: 18px; margin-bottom: 10px; }
+    .section h2 { font-size: 14px; font-weight: 700; margin: 0 0 8px 0; padding-bottom: 6px; border-bottom: 1px solid #e5e7eb; }
+    table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+    th, td { border: 1px solid #e5e7eb; padding: 8px; vertical-align: top; word-break: break-word; }
+    th { background: #f9fafb; text-transform: uppercase; letter-spacing: .5px; font-size: 11px; color: #374151; text-align: left; }
+    .badge { font-weight: 700; padding: 4px 8px; font-size: 11px; display: inline-block; border-radius: 4px; color: #fff; }
+    .CRITICAL { background: #dc2626; }
+    .HIGH { background: #f97316; }
+    .MEDIUM { background: #f59e0b; }
+    .LOW { background: #16a34a; }
+    .muted { color: #6b7280; }
+    .box { margin-top: 10px; padding: 10px; border: 1px solid #e5e7eb; background: #f9fafb; }
+    .box-title { font-weight: 700; margin-bottom: 6px; }
+    .footer { margin-top: 22px; border-top: 1px solid #e5e7eb; padding-top: 10px; font-size: 10px; color: #6b7280; }
+    ul { margin: 6px 0 0 18px; padding: 0; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <p class="title">AI Auditor Report</p>
+    <p class="subtitle">Audit ID: {{ audit.audit_id }}</p>
+  </div>
+
+  <div class="section">
+    <h2>Executive Summary</h2>
+    <div class="box">
+      {% for line in executive_summary %}
+        <div>{{ line }}</div>
+      {% endfor %}
+    </div>
+
+    <table>
+      <tr><th style="width: 220px;">Model</th><td>{{ audit.model_name }} ({{ audit.model_frontend_id }})</td></tr>
+      <tr><th>Executed At</th><td>{{ audit.executed_at }}</td></tr>
+      <tr><th>Audit Result</th><td>{{ audit.audit_result }}</td></tr>
+      <tr><th>Total Findings</th><td>{{ counts.findings_total }}</td></tr>
+      <tr><th>Total Evidence Interactions</th><td>{{ counts.interactions_total }}</td></tr>
+    </table>
+  </div>
+
+  <div class="section">
+    <h2>Findings</h2>
+    {% if findings|length == 0 %}
+      <p class="muted">No findings recorded in this audit.</p>
+    {% else %}
+      <table>
+        <thead>
+          <tr>
+            <th style="width: 140px;">Finding ID</th>
+            <th style="width: 90px;">Category</th>
+            <th style="width: 90px;">Severity</th>
+            <th style="width: 140px;">Metric</th>
+            <th>Description</th>
+            <th style="width: 280px;">Guidance (Non-Technical)</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for f in findings %}
+          <tr>
+            <td>{{ f.finding_id }}</td>
+            <td>{{ f.category }}</td>
+            <td><span class="badge {{ f.severity }}">{{ f.severity }}</span></td>
+            <td>{{ f.metric_name }}</td>
+            <td>{{ f.description }}</td>
+            <td>
+              <div class="box">
+                <div class="box-title">{{ f.explain.title }}</div>
+                <div><strong>What it means:</strong> {{ f.explain.simple_definition }}</div>
+                <div><strong>Why it matters:</strong> {{ f.explain.why_it_matters }}</div>
+                <div style="margin-top:6px;"><strong>How to fix:</strong></div>
+                <ul>
+                  {% for step in f.remediation.fix_steps %}
+                    <li>{{ step }}</li>
+                  {% endfor %}
+                </ul>
+              </div>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
+  </div>
+
+  <div class="section">
+    <h2>Evidence</h2>
+    {% if interactions|length == 0 %}
+      <p class="muted">No evidence interactions stored for this audit.</p>
+    {% else %}
+      <table>
+        <thead>
+          <tr>
+            <th style="width: 120px;">Prompt ID</th>
+            <th style="width: 80px;">Latency</th>
+            <th>Prompt</th>
+            <th>Response</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for i in interactions %}
+          <tr>
+            <td>{{ i.prompt_id }}</td>
+            <td>{{ i.latency_ms }} ms</td>
+            <td>{{ i.prompt }}</td>
+            <td>{{ i.response }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
+  </div>
+
+  <div class="footer">
+    Generated by AI Auditor Platform • {{ generated_at }}
+  </div>
+</body>
+</html>
+"""
+
+def render_pdf_html(structured_report: Dict[str, Any]) -> str:
+    t = Template(HTML_TEMPLATE)
+
+    findings = structured_report.get("findings", [])
+    enriched_findings: List[Dict[str, Any]] = []
+
+    for f in findings:
+        category = f.get("category")
+        severity = f.get("severity")
+        metric_name = f.get("metric_name")
+
+        enriched_findings.append({
+            **f,
+            "explain": explain_category(category),
+            "remediation": remediation_steps(category, severity, metric_name),
+        })
+
+    html = t.render(
+        audit=structured_report.get("audit", {}),
+        executive_summary=structured_report.get("executive_summary", []),
+        counts=structured_report.get("counts", {}),
+        findings=enriched_findings,
+        interactions=structured_report.get("interactions", []),
+        generated_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+    )
+    return html
