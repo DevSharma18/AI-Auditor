@@ -2,391 +2,387 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import PieChart from '@/components/charts/PieChart';
+import BarChart from '@/components/charts/BarChart';
+import { apiGet, safeNumber } from '@/lib/api-client';
 
-type BiasMetricsResponse = {
-    totalModelsAnalyzed: number;
-    modelsWithBias: number;
-    totalBiasIssues: number;
-    biasDistribution: { label: string; value: number }[];
-    severityData: { label: string; value: number }[];
+type MetricPoint = {
+  audit_id?: string;
+  executed_at?: string | null;
+  model_id?: string;
+  model_name?: string;
+  score_100?: number;
+  band?: string;
+  L?: number;
+  I?: number;
+  R?: number;
+  frameworks?: Record<string, any>;
+  signals?: Record<string, any>;
+  alpha?: number;
+  beta?: number;
 };
 
-const API_BASE =
-    process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://127.0.0.1:8000/api';
+type MetricScoring = {
+  metric?: string;
+  status?: 'OK' | 'NO_DATA';
+  latest?: MetricPoint | null;
+  trend?: MetricPoint[];
+};
+
+type MetricApiResponse = {
+  scoring?: MetricScoring;
+};
+
+function bandColor(band: string) {
+  const b = String(band || '').toUpperCase();
+  if (b === 'CRITICAL') return '#dc2626';
+  if (b === 'SEVERE') return '#f97316';
+  if (b === 'HIGH') return '#f59e0b';
+  if (b === 'MODERATE') return '#3b82f6';
+  return '#10b981';
+}
+
+function pct(v: any) {
+  return `${Math.round(safeNumber(v, 0) * 1000) / 10}%`;
+}
+
+function safeDateLabel(executedAt: string | null | undefined, auditId?: string) {
+  if (!executedAt) return String(auditId || '-');
+  try {
+    return new Date(executedAt).toLocaleDateString();
+  } catch {
+    return String(auditId || '-');
+  }
+}
 
 export default function BiasPage() {
-    const [loading, setLoading] = useState(true);
-    const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-    const [totalModelsAnalyzed, setTotalModelsAnalyzed] = useState(0);
-    const [modelsWithBias, setModelsWithBias] = useState(0);
-    const [totalBiasIssues, setTotalBiasIssues] = useState(0);
+  const [payload, setPayload] = useState<MetricApiResponse | null>(null);
 
-    const [biasDistributionData, setBiasDistributionData] = useState<any[]>([]);
-    const [biasSeverityData, setBiasSeverityData] = useState<any[]>([]);
+  useEffect(() => {
+    async function loadBias() {
+      try {
+        setLoading(true);
+        setError(null);
 
-    useEffect(() => {
-        async function loadBias() {
-            try {
-                setLoading(true);
-                setError(null);
-
-                const res = await fetch(`${API_BASE}/metrics/bias`, {
-                    headers: { Accept: 'application/json' },
-                    cache: 'no-store',
-                });
-
-                if (!res.ok) {
-                    const txt = await res.text();
-                    throw new Error(txt || 'Failed to fetch bias metrics');
-                }
-
-                const data = (await res.json()) as BiasMetricsResponse;
-
-                setTotalModelsAnalyzed(Number(data?.totalModelsAnalyzed ?? 0));
-                setModelsWithBias(Number(data?.modelsWithBias ?? 0));
-                setTotalBiasIssues(Number(data?.totalBiasIssues ?? 0));
-
-                // Dev UI shows "Bias Distribution by Type", but backend currently provides severity buckets
-                // Keep UI identical, map severity -> category
-                const dist = Array.isArray(data?.biasDistribution) ? data.biasDistribution : [];
-                setBiasDistributionData(
-                    dist.map((d) => ({
-                        name: String(d.label || 'UNKNOWN'),
-                        value: Number(d.value ?? 0),
-                    }))
-                );
-
-                const sev = Array.isArray(data?.severityData) ? data.severityData : [];
-                setBiasSeverityData(
-                    sev.map((d) => ({
-                        name: String(d.label || 'UNKNOWN'),
-                        value: Number(d.value ?? 0),
-                    }))
-                );
-            } catch (err: any) {
-                setError(err?.message || 'Failed to load bias metrics');
-            } finally {
-                setLoading(false);
-            }
-        }
-
-        loadBias();
-    }, []);
-
-    // DevSharma had a "High-Risk Model List" mock.
-    // Backend does not return per-model breakdown yet.
-    // Keep UI identical but show an empty list + counts.
-    const highRiskModels = useMemo(() => {
-        return [] as {
-            name: string;
-            biasScore: number;
-            biasType: string;
-            issuesDetected: number;
-            affectedGroups: string[];
-            severity: string;
-        }[];
-    }, []);
-
-    const getSeverityColor = (severity: string) => {
-        switch (severity) {
-            case 'CRITICAL':
-                return '#dc2626';
-            case 'HIGH':
-                return '#f97316';
-            case 'MEDIUM':
-                return '#fbbf24';
-            case 'LOW':
-                return '#84cc16';
-            default:
-                return '#6b7280';
-        }
-    };
-
-    const biasColors = ['#8b5cf6', '#ec4899', '#f59e0b', '#3b82f6', '#10b981'];
-    const severityColors = ['#dc2626', '#f97316', '#fbbf24', '#84cc16'];
-
-    // Prevent overlap styles
-    const safeTitle = {
-        fontSize: '28px',
-        fontWeight: '700',
-        color: '#1a1a1a',
-        marginBottom: '8px',
-        lineHeight: 1.2,
-        wordBreak: 'break-word' as const,
-    };
-
-    const safeSub = {
-        fontSize: '14px',
-        color: '#6b7280',
-        lineHeight: 1.5,
-        wordBreak: 'break-word' as const,
-    };
-
-    if (loading) {
-        return (
-            <div style={{ minHeight: '100vh', background: '#ffffff', padding: '0' }}>
-                <div style={{ marginBottom: '32px' }}>
-                    <h1 style={safeTitle}>Bias Detection & Analysis</h1>
-                    <p style={safeSub}>Loading bias metrics...</p>
-                </div>
-            </div>
-        );
+        const data = await apiGet<MetricApiResponse>('/metrics/bias');
+        setPayload(data);
+      } catch (err: any) {
+        setError(err?.message || 'Failed to load bias metrics');
+      } finally {
+        setLoading(false);
+      }
     }
 
-    if (error) {
-        return (
-            <div style={{ minHeight: '100vh', background: '#ffffff', padding: '0' }}>
-                <div style={{ marginBottom: '32px' }}>
-                    <h1 style={safeTitle}>Bias Detection & Analysis</h1>
-                    <p style={safeSub}>
-                        Monitor and analyze bias patterns across AI models to ensure fairness and compliance
-                    </p>
-                </div>
+    loadBias();
+  }, []);
 
-                <div
-                    style={{
-                        background: '#fef2f2',
-                        border: '2px solid #fca5a5',
-                        padding: '20px',
-                        marginBottom: '24px',
-                    }}
-                >
-                    <div style={{ fontSize: '14px', fontWeight: '700', color: '#991b1b' }}>
-                        Failed to load bias metrics
-                    </div>
-                    <div style={{ fontSize: '13px', color: '#7f1d1d', marginTop: '6px', lineHeight: 1.5 }}>
-                        {error}
-                    </div>
-                </div>
-            </div>
-        );
-    }
+  const scoring = payload?.scoring;
+  const latest = scoring?.latest || null;
+  const trend = Array.isArray(scoring?.trend) ? scoring?.trend : [];
 
+  const trendPoints = useMemo(() => {
+    if (!Array.isArray(trend) || trend.length === 0) return [];
+
+    // Always show last 10 trend points (backend says last 10 audits)
+    return trend.slice(-10).map((x, idx) => ({
+      name: safeDateLabel(x.executed_at, x.audit_id || `audit_${idx + 1}`),
+      value: safeNumber(x.score_100, 0),
+    }));
+  }, [trend]);
+
+  const trendBucketData = useMemo(() => {
+    // Your BarChart component expects 1M/6M/1Y
+    // We keep UI SAME but map last N points into buckets.
+    const last10 = trendPoints.slice(-10);
+    const last6 = trendPoints.slice(-6);
+    const last3 = trendPoints.slice(-3);
+
+    return {
+      oneMonth: last3,
+      sixMonths: last6,
+      oneYear: last10,
+    };
+  }, [trendPoints]);
+
+  const scoringBreakdown = useMemo(() => {
+    if (!latest) return [];
+
+    return [
+      { name: 'Likelihood (L)', value: Math.round(safeNumber(latest.L, 0) * 100) },
+      { name: 'Impact (I)', value: Math.round(safeNumber(latest.I, 0) * 100) },
+      { name: 'Regulatory (R)', value: Math.round(safeNumber(latest.R, 0) * 100) },
+    ];
+  }, [latest]);
+
+  const safeTitle = {
+    fontSize: '28px',
+    fontWeight: '700',
+    color: '#1a1a1a',
+    marginBottom: '8px',
+    lineHeight: 1.2,
+    wordBreak: 'break-word' as const,
+  };
+
+  const safeSub = {
+    fontSize: '14px',
+    color: '#6b7280',
+    lineHeight: 1.5,
+    wordBreak: 'break-word' as const,
+  };
+
+  if (loading) {
     return (
-        <div style={{ minHeight: '100vh', background: '#ffffff', padding: '0' }}>
-            {/* Page Header */}
-            <div style={{ marginBottom: '32px' }}>
-                <h1 style={safeTitle}>Bias Detection & Analysis</h1>
-                <p style={safeSub}>
-                    Monitor and analyze bias patterns across AI models to ensure fairness and compliance
-                </p>
-            </div>
-
-            {/* Top Metrics */}
-            <div
-                style={{
-                    display: 'grid',
-                    gridTemplateColumns: 'repeat(3, 1fr)',
-                    gap: '24px',
-                    marginBottom: '48px',
-                }}
-            >
-                <div style={{ background: '#ffffff', border: '2px solid #e5e7eb', padding: '24px', overflow: 'hidden' }}>
-                    <div
-                        style={{
-                            fontSize: '13px',
-                            fontWeight: '600',
-                            color: '#6b7280',
-                            marginBottom: '12px',
-                            textTransform: 'uppercase',
-                            letterSpacing: '0.5px',
-                            wordBreak: 'break-word',
-                        }}
-                    >
-                        Total Models Analyzed
-                    </div>
-                    <div style={{ fontSize: '48px', fontWeight: '700', color: '#3b82f6', lineHeight: '1' }}>
-                        {totalModelsAnalyzed}
-                    </div>
-                </div>
-
-                <div style={{ background: '#ffffff', border: '2px solid #e5e7eb', padding: '24px', overflow: 'hidden' }}>
-                    <div
-                        style={{
-                            fontSize: '13px',
-                            fontWeight: '600',
-                            color: '#6b7280',
-                            marginBottom: '12px',
-                            textTransform: 'uppercase',
-                            letterSpacing: '0.5px',
-                            wordBreak: 'break-word',
-                        }}
-                    >
-                        Models With Bias
-                    </div>
-                    <div style={{ fontSize: '48px', fontWeight: '700', color: '#ef4444', lineHeight: '1' }}>
-                        {modelsWithBias}
-                    </div>
-                </div>
-
-                <div style={{ background: '#ffffff', border: '2px solid #e5e7eb', padding: '24px', overflow: 'hidden' }}>
-                    <div
-                        style={{
-                            fontSize: '13px',
-                            fontWeight: '600',
-                            color: '#6b7280',
-                            marginBottom: '12px',
-                            textTransform: 'uppercase',
-                            letterSpacing: '0.5px',
-                            wordBreak: 'break-word',
-                        }}
-                    >
-                        Total Bias Issues
-                    </div>
-                    <div style={{ fontSize: '48px', fontWeight: '700', color: '#f59e0b', lineHeight: '1' }}>
-                        {totalBiasIssues}
-                    </div>
-                </div>
-            </div>
-
-            {/* High-Risk Model List */}
-            <div style={{ marginBottom: '48px' }}>
-                <h2
-                    style={{
-                        fontSize: '20px',
-                        fontWeight: '700',
-                        color: '#1a1a1a',
-                        marginBottom: '24px',
-                        borderBottom: '2px solid #e5e7eb',
-                        paddingBottom: '12px',
-                        lineHeight: 1.2,
-                    }}
-                >
-                    High-Risk Model List
-                </h2>
-
-                <div style={{ background: '#fef2f2', border: '2px solid #fca5a5', padding: '24px', marginBottom: '24px' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '8px' }}>
-                        <div style={{ fontSize: '18px', fontWeight: '700', color: '#991b1b', lineHeight: 1.2, wordBreak: 'break-word' }}>
-                            {highRiskModels.length} models show high bias
-                        </div>
-                    </div>
-                    <div style={{ fontSize: '13px', color: '#7f1d1d', lineHeight: 1.5 }}>
-                        Immediate attention may be required to address fairness concerns.
-                    </div>
-                </div>
-
-                {highRiskModels.length === 0 ? (
-                    <div style={{ background: '#ffffff', border: '2px solid #e5e7eb', padding: '24px', color: '#6b7280', lineHeight: 1.5 }}>
-                        No high-risk model breakdown available yet. This will be enabled when backend provides per-model bias scoring.
-                    </div>
-                ) : (
-                    <div style={{ display: 'grid', gap: '16px' }}>
-                        {highRiskModels.map((model, index) => (
-                            <div
-                                key={index}
-                                style={{
-                                    background: '#ffffff',
-                                    border: `2px solid ${getSeverityColor(model.severity)}`,
-                                    padding: '24px',
-                                    display: 'grid',
-                                    gridTemplateColumns: '2fr 1fr 1fr',
-                                    gap: '24px',
-                                    alignItems: 'center',
-                                }}
-                            >
-                                <div style={{ overflow: 'hidden' }}>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '8px', flexWrap: 'wrap' }}>
-                                        <div style={{ fontSize: '18px', fontWeight: '700', color: '#1a1a1a', wordBreak: 'break-word' }}>
-                                            {model.name}
-                                        </div>
-                                        <span
-                                            style={{
-                                                padding: '4px 12px',
-                                                background: getSeverityColor(model.severity),
-                                                color: '#ffffff',
-                                                fontSize: '11px',
-                                                fontWeight: '700',
-                                                textTransform: 'uppercase',
-                                                letterSpacing: '0.5px',
-                                            }}
-                                        >
-                                            {model.severity}
-                                        </span>
-                                    </div>
-                                    <div style={{ fontSize: '14px', color: '#6b7280', marginBottom: '8px', lineHeight: 1.5 }}>
-                                        <strong>Bias Type:</strong> {model.biasType}
-                                    </div>
-                                    <div style={{ fontSize: '13px', color: '#6b7280', lineHeight: 1.5 }}>
-                                        <strong>Affected Groups:</strong> {model.affectedGroups.join(', ')}
-                                    </div>
-                                </div>
-
-                                <div style={{ textAlign: 'center', borderLeft: '2px solid #e5e7eb', borderRight: '2px solid #e5e7eb', padding: '0 16px' }}>
-                                    <div style={{ fontSize: '13px', fontWeight: '600', color: '#6b7280', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-                                        Issues Detected
-                                    </div>
-                                    <div style={{ fontSize: '36px', fontWeight: '700', color: getSeverityColor(model.severity) }}>
-                                        {model.issuesDetected}
-                                    </div>
-                                </div>
-
-                                <div style={{ textAlign: 'center' }}>
-                                    <div style={{ fontSize: '13px', fontWeight: '600', color: '#6b7280', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-                                        Bias Score
-                                    </div>
-                                    <div style={{ fontSize: '36px', fontWeight: '700', color: getSeverityColor(model.severity) }}>
-                                        {model.biasScore.toFixed(1)}
-                                    </div>
-                                    <div style={{ fontSize: '12px', color: '#6b7280' }}>/ 10.0</div>
-                                </div>
-                            </div>
-                        ))}
-                    </div>
-                )}
-            </div>
-
-            {/* Bias Analysis Charts */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px', marginBottom: '48px' }}>
-                <div>
-                    <h2 style={{ fontSize: '20px', fontWeight: '700', color: '#1a1a1a', marginBottom: '24px', borderBottom: '2px solid #e5e7eb', paddingBottom: '12px' }}>
-                        Bias Distribution by Type
-                    </h2>
-                    <div style={{ background: '#ffffff', border: '2px solid #e5e7eb', padding: '24px', overflow: 'hidden' }}>
-                        <PieChart data={biasDistributionData} colors={biasColors} title="Bias Issues by Category" />
-                    </div>
-                </div>
-
-                <div>
-                    <h2 style={{ fontSize: '20px', fontWeight: '700', color: '#1a1a1a', marginBottom: '24px', borderBottom: '2px solid #e5e7eb', paddingBottom: '12px' }}>
-                        Bias Severity Breakdown
-                    </h2>
-                    <div style={{ background: '#ffffff', border: '2px solid #e5e7eb', padding: '24px', overflow: 'hidden' }}>
-                        <PieChart data={biasSeverityData} colors={severityColors} title="Issues by Severity Level" />
-                    </div>
-                </div>
-            </div>
-
-            {/* Detailed Bias Metrics */}
-            <div style={{ marginBottom: '48px' }}>
-                <h2 style={{ fontSize: '20px', fontWeight: '700', color: '#1a1a1a', marginBottom: '24px', borderBottom: '2px solid #e5e7eb', paddingBottom: '12px' }}>
-                    Detailed Bias Metrics
-                </h2>
-
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '16px' }}>
-                    {biasDistributionData.map((bias, index) => (
-                        <div
-                            key={index}
-                            style={{
-                                background: '#ffffff',
-                                border: `2px solid ${biasColors[index % biasColors.length]}`,
-                                padding: '20px',
-                                textAlign: 'center',
-                                overflow: 'hidden',
-                            }}
-                        >
-                            <div style={{ fontSize: '13px', fontWeight: '600', color: '#6b7280', marginBottom: '12px', textTransform: 'uppercase', letterSpacing: '0.5px', wordBreak: 'break-word' }}>
-                                {bias.name}
-                            </div>
-                            <div style={{ fontSize: '32px', fontWeight: '700', color: biasColors[index % biasColors.length], lineHeight: '1' }}>
-                                {bias.value}
-                            </div>
-                            <div style={{ fontSize: '11px', color: '#6b7280', marginTop: '8px' }}>detected issues</div>
-                        </div>
-                    ))}
-                </div>
-            </div>
+      <div style={{ minHeight: '100vh', background: '#ffffff', padding: '0' }}>
+        <div style={{ marginBottom: '32px' }}>
+          <h1 style={safeTitle}>Bias Detection & Fairness Risk</h1>
+          <p style={safeSub}>Loading bias scoring...</p>
         </div>
+      </div>
     );
+  }
+
+  if (error) {
+    return (
+      <div style={{ minHeight: '100vh', background: '#ffffff', padding: '0' }}>
+        <div style={{ marginBottom: '32px' }}>
+          <h1 style={safeTitle}>Bias Detection & Fairness Risk</h1>
+          <p style={safeSub}>
+            Understand fairness risk, discrimination exposure, and compliance pressure.
+          </p>
+        </div>
+
+        <div
+          style={{
+            background: '#fef2f2',
+            border: '2px solid #fca5a5',
+            padding: '20px',
+            marginBottom: '24px',
+          }}
+        >
+          <div style={{ fontSize: '14px', fontWeight: '700', color: '#991b1b' }}>
+            Failed to load bias metrics
+          </div>
+          <div style={{ fontSize: '13px', color: '#7f1d1d', marginTop: '6px', lineHeight: 1.5 }}>
+            {error}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!scoring || scoring.status === 'NO_DATA' || !latest) {
+    return (
+      <div style={{ minHeight: '100vh', background: '#ffffff', padding: '0' }}>
+        <div style={{ marginBottom: '32px' }}>
+          <h1 style={safeTitle}>Bias Detection & Fairness Risk</h1>
+          <p style={safeSub}>
+            No bias scoring data yet. Run at least one audit to populate this page.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  const band = String(latest.band || 'LOW').toUpperCase();
+  const bandClr = bandColor(band);
+
+  return (
+    <div style={{ minHeight: '100vh', background: '#ffffff', padding: '0' }}>
+      {/* Header */}
+      <div style={{ marginBottom: '24px' }}>
+        <h1 style={safeTitle}>Bias Detection & Fairness Risk</h1>
+        <p style={safeSub}>
+          Bias risk measures how likely the model is to generate discriminatory or unfair outputs,
+          combined with business impact and regulatory pressure.
+        </p>
+      </div>
+
+      {/* Enterprise Score Cards */}
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(3, 1fr)',
+          gap: '24px',
+          marginBottom: '28px',
+        }}
+      >
+        <MetricCard
+          title="Bias Risk Score"
+          value={`${Math.round(safeNumber(latest.score_100, 0))}/100`}
+          color={bandClr}
+          description="Overall severity of fairness risk, scaled to 0–100."
+        />
+        <MetricCard
+          title="Risk Band"
+          value={band}
+          color={bandClr}
+          description="Executive label (Low → Critical) used for decision-making."
+        />
+        <MetricCard
+          title="Model (Latest Audit)"
+          value={latest.model_name || latest.model_id || '-'}
+          color="#3b82f6"
+          description="The most recent audited model used for this score."
+        />
+      </div>
+
+      {/* Explain L/I/R */}
+      <div style={{ border: '2px solid #e5e7eb', padding: '18px', marginBottom: '28px' }}>
+        <div style={{ fontSize: 16, fontWeight: 800, color: '#111827', marginBottom: 8 }}>
+          What this score means (non-technical)
+        </div>
+        <div style={{ fontSize: 13, color: '#6b7280', lineHeight: 1.6 }}>
+          This score is calculated using three components:
+          <br />
+          <b>Likelihood (L)</b> = how often bias signals are observed during audits.
+          <br />
+          <b>Impact (I)</b> = how damaging bias can be (legal, reputational, discrimination risk).
+          <br />
+          <b>Regulatory weight (R)</b> = how strongly frameworks like GDPR / EU AI Act / OWASP cover this issue.
+        </div>
+      </div>
+
+      {/* Charts */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px', marginBottom: '28px' }}>
+        <div>
+          <h2 style={sectionTitle}>Scoring Breakdown (L / I / R)</h2>
+          <div style={{ background: '#ffffff', border: '2px solid #e5e7eb', padding: '24px', overflow: 'hidden' }}>
+            <PieChart
+              data={scoringBreakdown}
+              colors={['#3b82f6', '#f59e0b', '#dc2626']}
+              title="Bias Scoring Breakdown"
+            />
+          </div>
+        </div>
+
+        <div>
+          <h2 style={sectionTitle}>Bias Risk Trend (Last 10 Audits)</h2>
+          <div style={{ background: '#ffffff', border: '2px solid #e5e7eb', padding: '24px', overflow: 'hidden' }}>
+            <BarChart data={trendBucketData} color={bandClr} title="Bias Score Trend (0–100)" />
+          </div>
+        </div>
+      </div>
+
+      {/* Trend Table */}
+      <div style={{ marginBottom: '48px' }}>
+        <h2 style={sectionTitle}>Audit History (Bias Risk)</h2>
+
+        <div style={{ background: '#ffffff', border: '2px solid #e5e7eb', overflow: 'hidden' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr style={{ background: '#f9fafb', borderBottom: '2px solid #e5e7eb' }}>
+                <th style={thStyle}>Executed</th>
+                <th style={thStyle}>Model</th>
+                <th style={thStyle}>Score</th>
+                <th style={thStyle}>Band</th>
+                <th style={thStyle}>Likelihood</th>
+                <th style={thStyle}>Impact</th>
+                <th style={thStyle}>Regulatory</th>
+              </tr>
+            </thead>
+            <tbody>
+              {trend.slice().reverse().map((row, idx) => {
+                const bc = bandColor(String(row.band || 'LOW'));
+                return (
+                  <tr key={idx} style={{ borderBottom: '1px solid #e5e7eb' }}>
+                    <td style={tdMuted}>
+                      {row.executed_at ? new Date(row.executed_at).toLocaleString() : '-'}
+                    </td>
+                    <td style={tdStrong}>{row.model_name || row.model_id || '-'}</td>
+                    <td style={tdStrong}>{Math.round(safeNumber(row.score_100, 0))}</td>
+                    <td style={tdMuted}>
+                      <span
+                        style={{
+                          padding: '4px 10px',
+                          border: `2px solid ${bc}`,
+                          color: bc,
+                          fontSize: 12,
+                          fontWeight: 800,
+                          textTransform: 'uppercase',
+                        }}
+                      >
+                        {String(row.band || 'LOW')}
+                      </span>
+                    </td>
+                    <td style={tdMuted}>{pct(row.L)}</td>
+                    <td style={tdMuted}>{pct(row.I)}</td>
+                    <td style={tdMuted}>{pct(row.R)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
 }
+
+function MetricCard({
+  title,
+  value,
+  color,
+  description,
+}: {
+  title: string;
+  value: any;
+  color: string;
+  description: string;
+}) {
+  return (
+    <div style={{ border: '2px solid #e5e7eb', padding: '22px', overflow: 'hidden' }}>
+      <div
+        style={{
+          fontSize: 13,
+          fontWeight: 800,
+          color: '#6b7280',
+          textTransform: 'uppercase',
+          letterSpacing: '0.5px',
+        }}
+      >
+        {title}
+      </div>
+      <div style={{ fontSize: 42, fontWeight: 900, color, lineHeight: 1.05, marginTop: 8 }}>
+        {value}
+      </div>
+      <div style={{ fontSize: 12, color: '#6b7280', marginTop: 10, lineHeight: 1.5 }}>
+        {description}
+      </div>
+    </div>
+  );
+}
+
+const sectionTitle = {
+  fontSize: '20px',
+  fontWeight: '700',
+  color: '#1a1a1a',
+  marginBottom: '16px',
+  borderBottom: '2px solid #e5e7eb',
+  paddingBottom: '10px',
+  lineHeight: 1.2,
+};
+
+const thStyle = {
+  textAlign: 'left' as const,
+  padding: '12px 16px',
+  fontSize: '12px',
+  fontWeight: '800',
+  color: '#6b7280',
+  textTransform: 'uppercase' as const,
+  letterSpacing: '0.5px',
+};
+
+const tdStrong = {
+  padding: '14px 16px',
+  fontSize: '14px',
+  fontWeight: '700',
+  color: '#111827',
+};
+
+const tdMuted = {
+  padding: '14px 16px',
+  fontSize: '13px',
+  color: '#6b7280',
+};

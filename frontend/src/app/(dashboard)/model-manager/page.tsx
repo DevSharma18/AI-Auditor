@@ -1,10 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-
-const API_BASE =
-    process.env.NEXT_PUBLIC_API_BASE_URL ??
-    'http://127.0.0.1:8000/api';
+import { apiGet, apiPost } from '@/lib/api-client';
 
 // ---------------- Tooltip ----------------
 function InfoButton({ tooltip }: { tooltip: string }) {
@@ -28,7 +25,7 @@ export default function ModelManagerPage() {
 
     // ---------------- Form state ----------------
     const [modelNickname, setModelNickname] = useState('');
-    const [modelName, setModelName] = useState(''); // ✅ NEW
+    const [modelName, setModelName] = useState(''); // provider model/deployment name
     const [apiUrl, setApiUrl] = useState('');
     const [apiKey, setApiKey] = useState('');
     const [description, setDescription] = useState('');
@@ -38,8 +35,7 @@ export default function ModelManagerPage() {
     async function loadModels() {
         try {
             setLoadingModels(true);
-            const res = await fetch(`${API_BASE}/models`);
-            const data = await res.json();
+            const data = await apiGet<any>('/models');
             setModels(Array.isArray(data) ? data : []);
         } catch {
             setModels([]);
@@ -67,47 +63,32 @@ export default function ModelManagerPage() {
         setLoading(true);
 
         try {
-            // 🔑 BUILD PROVIDER-AGNOSTIC REQUEST TEMPLATE
+            // 🔑 Provider-agnostic request template
             const request_template: any = {
                 temperature,
             };
 
             if (modelName) {
-                // OpenAI / Anthropic / Azure style
                 request_template.model = modelName;
-                request_template.messages = [
-                    { role: 'user', content: '{{PROMPT}}' },
-                ];
+                request_template.messages = [{ role: 'user', content: '{{PROMPT}}' }];
             } else {
-                // Local / Custom API style
                 request_template.input = '{{PROMPT}}';
             }
 
-            const res = await fetch(`${API_BASE}/models/register-with-connector`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    model_id: modelId,
-                    name: modelNickname,
-                    endpoint: apiUrl,
-                    headers: apiKey
-                        ? {
-                            Authorization: `Bearer ${apiKey}`,
-                            'Content-Type': 'application/json',
-                        }
-                        : { 'Content-Type': 'application/json' },
-                    request_template,
-                    response_path: modelName
-                        ? 'choices[0].message.content'
-                        : 'output',
-                    description,
-                }),
+            await apiPost('/models/register-with-connector', {
+                model_id: modelId,
+                name: modelNickname,
+                endpoint: apiUrl,
+                headers: apiKey
+                    ? {
+                          Authorization: `Bearer ${apiKey}`,
+                          'Content-Type': 'application/json',
+                      }
+                    : { 'Content-Type': 'application/json' },
+                request_template,
+                response_path: modelName ? 'choices[0].message.content' : 'output',
+                description,
             });
-
-            if (!res.ok) {
-                const txt = await res.text();
-                throw new Error(txt);
-            }
 
             setModalOpen(false);
             setModelNickname('');
@@ -116,9 +97,10 @@ export default function ModelManagerPage() {
             setApiKey('');
             setDescription('');
             setTemperature(0.7);
-            loadModels();
+
+            await loadModels();
         } catch (err: any) {
-            alert(`Failed to register model:\n${err.message}`);
+            alert(`Failed to register model:\n${err?.message || 'Unknown error'}`);
         } finally {
             setLoading(false);
         }
@@ -128,14 +110,7 @@ export default function ModelManagerPage() {
     async function runAudit(modelId: string) {
         try {
             setRunningAudit(modelId);
-
-            const res = await fetch(
-                `${API_BASE}/audits/model/${modelId}/run`,
-                { method: 'POST' }
-            );
-
-            if (!res.ok) throw new Error();
-
+            await apiPost(`/audits/model/${modelId}/run`);
             await loadModels();
         } catch {
             alert('Failed to run audit');
@@ -211,26 +186,55 @@ export default function ModelManagerPage() {
                         <label>
                             Model Nickname * <InfoButton tooltip="Human-readable name" />
                         </label>
-                        <input style={inputStyle} value={modelNickname} onChange={(e) => setModelNickname(e.target.value)} />
+                        <input
+                            style={inputStyle}
+                            value={modelNickname}
+                            onChange={(e) => setModelNickname(e.target.value)}
+                        />
 
                         <label>
-                            Model / Deployment Name <InfoButton tooltip="e.g. gpt-4o-mini, claude-3-opus" />
+                            Model / Deployment Name{' '}
+                            <InfoButton tooltip="e.g. gpt-4o-mini, claude-3-opus" />
                         </label>
-                        <input style={inputStyle} value={modelName} onChange={(e) => setModelName(e.target.value)} />
+                        <input
+                            style={inputStyle}
+                            value={modelName}
+                            onChange={(e) => setModelName(e.target.value)}
+                        />
 
                         <label>
                             API URL * <InfoButton tooltip="Inference endpoint" />
                         </label>
-                        <input style={inputStyle} value={apiUrl} onChange={(e) => setApiUrl(e.target.value)} />
+                        <input
+                            style={inputStyle}
+                            value={apiUrl}
+                            onChange={(e) => setApiUrl(e.target.value)}
+                        />
 
                         <label>API Key</label>
-                        <input type="password" style={inputStyle} value={apiKey} onChange={(e) => setApiKey(e.target.value)} />
+                        <input
+                            type="password"
+                            style={inputStyle}
+                            value={apiKey}
+                            onChange={(e) => setApiKey(e.target.value)}
+                        />
 
                         <label>Description</label>
-                        <textarea style={{ ...inputStyle, height: 80 }} value={description} onChange={(e) => setDescription(e.target.value)} />
+                        <textarea
+                            style={{ ...inputStyle, height: 80 }}
+                            value={description}
+                            onChange={(e) => setDescription(e.target.value)}
+                        />
 
                         <label>Temperature: {temperature}</label>
-                        <input type="range" min="0" max="2" step="0.1" value={temperature} onChange={(e) => setTemperature(Number(e.target.value))} />
+                        <input
+                            type="range"
+                            min="0"
+                            max="2"
+                            step="0.1"
+                            value={temperature}
+                            onChange={(e) => setTemperature(Number(e.target.value))}
+                        />
 
                         <div style={{ display: 'flex', gap: 12, marginTop: 20 }}>
                             <button style={secondaryBtn} onClick={() => setModalOpen(false)}>

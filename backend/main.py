@@ -8,7 +8,10 @@ import uvicorn
 from .database import init_db
 from .routes import router
 from .routes_metrics import router as metrics_router
+from .routes_connectors import router as connectors_router  # ✅ NEW
 from .scheduler import start_scheduler, stop_scheduler
+from .routes_dashboard import router as dashboard_router
+
 
 # -------------------------------------------------
 # FASTAPI APP
@@ -41,6 +44,9 @@ app.add_middleware(
 # -------------------------------------------------
 app.include_router(router, prefix="/api")
 app.include_router(metrics_router, prefix="/api")
+app.include_router(connectors_router, prefix="/api")  # ✅ NEW
+app.include_router(dashboard_router, prefix="/api")
+
 
 # -------------------------------------------------
 # STARTUP / SHUTDOWN

@@ -9,6 +9,24 @@ const API_BASE =
     process.env.NEXT_PUBLIC_API_BASE_URL ??
     'http://127.0.0.1:8000/api';
 
+/**
+ * Small helper: make sure numbers never break the UI
+ */
+export function safeNumber(v: any, fallback = 0) {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : fallback;
+}
+
+/**
+ * Normalize a path to always start with /
+ */
+function normalizePath(path: string) {
+    return path.startsWith('/') ? path : `/${path}`;
+}
+
+/**
+ * Handle all API responses safely
+ */
 async function handleResponse(res: Response) {
     if (!res.ok) {
         let message = 'API error';
@@ -30,28 +48,61 @@ async function handleResponse(res: Response) {
     return res.text();
 }
 
-function normalizePath(path: string) {
-    return path.startsWith('/') ? path : `/${path}`;
+/**
+ * Fetch wrapper with timeout (enterprise safe)
+ */
+async function fetchWithTimeout(
+    url: string,
+    options: RequestInit,
+    timeoutMs = 15000
+) {
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+        const res = await fetch(url, {
+            ...options,
+            signal: controller.signal,
+        });
+        return res;
+    } catch (err: any) {
+        if (err?.name === 'AbortError') {
+            throw new Error('Request timed out. Backend may be unreachable.');
+        }
+        throw err;
+    } finally {
+        clearTimeout(id);
+    }
 }
 
 export async function apiGet<T = any>(path: string): Promise<T> {
-    const res = await fetch(`${API_BASE}${normalizePath(path)}`, {
-        method: 'GET',
-        headers: { Accept: 'application/json' },
-        cache: 'no-store',
-    });
+    const res = await fetchWithTimeout(
+        `${API_BASE}${normalizePath(path)}`,
+        {
+            method: 'GET',
+            headers: { Accept: 'application/json' },
+            cache: 'no-store',
+        },
+        15000
+    );
+
     return handleResponse(res) as Promise<T>;
 }
 
 export async function apiPost<T = any>(path: string, body?: unknown): Promise<T> {
-    const res = await fetch(`${API_BASE}${normalizePath(path)}`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
+    const res = await fetchWithTimeout(
+        `${API_BASE}${normalizePath(path)}`,
+        {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                Accept: 'application/json',
+            },
+            body: body ? JSON.stringify(body) : undefined,
         },
-        body: body ? JSON.stringify(body) : undefined,
-    });
+        20000
+    );
+
     return handleResponse(res) as Promise<T>;
 }
 
@@ -59,10 +110,14 @@ export async function apiPost<T = any>(path: string, body?: unknown): Promise<T>
  * Download file/blob (used for audit JSON report)
  */
 export async function apiGetBlob(path: string): Promise<Blob> {
-    const res = await fetch(`${API_BASE}${normalizePath(path)}`, {
-        method: 'GET',
-        headers: { Accept: 'application/json' },
-    });
+    const res = await fetchWithTimeout(
+        `${API_BASE}${normalizePath(path)}`,
+        {
+            method: 'GET',
+            headers: { Accept: 'application/json' },
+        },
+        20000
+    );
 
     if (!res.ok) {
         let message = 'Download failed';

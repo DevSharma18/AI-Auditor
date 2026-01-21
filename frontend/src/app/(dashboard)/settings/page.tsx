@@ -1,13 +1,50 @@
 'use client';
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
+
+const API_BASE =
+    process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://127.0.0.1:8000/api';
 
 export default function SettingsPage() {
+    // -----------------------------
     // Model Integration state
-    const [modelEndpoint, setModelEndpoint] = useState('https://model.endpoint.com/');
-    const [apiKey, setApiKey] = useState('sk_test_1234567890abcdef');
+    // -----------------------------
+    const [modelEndpoint, setModelEndpoint] = useState('http://127.0.0.1:11434/api/generate');
+    const [apiKey, setApiKey] = useState('');
 
+    const [httpMethod, setHttpMethod] = useState<'POST' | 'GET'>('POST');
+    const [headersJson, setHeadersJson] = useState<string>(
+        JSON.stringify({ 'Content-Type': 'application/json' }, null, 2)
+    );
+
+    const [requestTemplateJson, setRequestTemplateJson] = useState<string>(
+        JSON.stringify(
+            {
+                model: 'llama3',
+                prompt: '{{PROMPT}}',
+                stream: false,
+            },
+            null,
+            2
+        )
+    );
+
+    const [responsePath, setResponsePath] = useState('response');
+
+    const [testPrompt, setTestPrompt] = useState('Say hello in one line.');
+
+    const [testing, setTesting] = useState(false);
+    const [testResult, setTestResult] = useState<{
+        ok: boolean;
+        message: string;
+        latency_ms?: number;
+        extracted_response?: string;
+        raw_preview?: string;
+    } | null>(null);
+
+    // -----------------------------
     // Rule Configuration state
+    // -----------------------------
     const [driftThreshold, setDriftThreshold] = useState(0.5);
     const [biasThreshold, setBiasThreshold] = useState(0.3);
     const [driftRateRule, setDriftRateRule] = useState(true);
@@ -16,7 +53,9 @@ export default function SettingsPage() {
     const [formateConfigRule, setFormateConfigRule] = useState(true);
     const [burorRules, setBurorRules] = useState(true);
 
+    // -----------------------------
     // Notification Settings state
+    // -----------------------------
     const [email, setEmail] = useState('');
     const [webhook, setWebhook] = useState('');
     const [severityFilter, setSeverityFilter] = useState(true);
@@ -24,8 +63,106 @@ export default function SettingsPage() {
     const [mediumFilter, setMediumFilter] = useState(false);
     const [lowFilter, setLowFilter] = useState(false);
 
-    const handleConnectionTest = () => {
-        alert('Testing connection...');
+    // -----------------------------
+    // Helpers
+    // -----------------------------
+    const parsedHeaders = useMemo(() => {
+        try {
+            const parsed = JSON.parse(headersJson || '{}');
+            if (typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+            return parsed;
+        } catch {
+            return null;
+        }
+    }, [headersJson]);
+
+    const parsedTemplate = useMemo(() => {
+        try {
+            const parsed = JSON.parse(requestTemplateJson || '{}');
+            if (typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+            return parsed;
+        } catch {
+            return null;
+        }
+    }, [requestTemplateJson]);
+
+    const handleConnectionTest = async () => {
+        setTestResult(null);
+
+        // Validate JSON before calling API
+        if (!parsedHeaders) {
+            setTestResult({
+                ok: false,
+                message: 'Headers JSON is invalid. Please fix it.',
+            });
+            return;
+        }
+
+        if (!parsedTemplate) {
+            setTestResult({
+                ok: false,
+                message: 'Request Template JSON is invalid. Please fix it.',
+            });
+            return;
+        }
+
+        if (!requestTemplateJson.includes('{{PROMPT}}')) {
+            setTestResult({
+                ok: false,
+                message: 'Request template must contain {{PROMPT}} placeholder.',
+            });
+            return;
+        }
+
+        try {
+            setTesting(true);
+
+            const res = await fetch(`${API_BASE}/connectors/test`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    Accept: 'application/json',
+                },
+                body: JSON.stringify({
+                    endpoint: modelEndpoint,
+                    method: httpMethod,
+                    headers: {
+                        ...(parsedHeaders || {}),
+                        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+                    },
+                    request_template: parsedTemplate,
+                    response_path: responsePath,
+                    test_prompt: testPrompt,
+                    timeout_seconds: 20,
+                }),
+            });
+
+            const contentType = res.headers.get('content-type') || '';
+            const data = contentType.includes('application/json') ? await res.json() : await res.text();
+
+            if (!res.ok) {
+                setTestResult({
+                    ok: false,
+                    message: typeof data === 'string' ? data : data?.detail || 'Connection test failed',
+                });
+                return;
+            }
+
+            setTestResult({
+                ok: true,
+                message: data?.message || 'Connection successful',
+                latency_ms: data?.latency_ms,
+                extracted_response: data?.extracted_response,
+                raw_preview: data?.raw_preview,
+            });
+        } catch (err: any) {
+            setTestResult({
+                ok: false,
+                message: err?.message || 'Connection test failed',
+            });
+        } finally {
+            setTesting(false);
+        }
     };
 
     return (
@@ -57,9 +194,32 @@ export default function SettingsPage() {
                                     fontSize: '14px',
                                     outline: 'none',
                                 }}
-                                onFocus={(e) => e.target.style.borderColor = '#3b82f6'}
-                                onBlur={(e) => e.target.style.borderColor = '#d1d5db'}
+                                onFocus={(e) => (e.target.style.borderColor = '#3b82f6')}
+                                onBlur={(e) => (e.target.style.borderColor = '#d1d5db')}
                             />
+                        </div>
+
+                        {/* HTTP Method */}
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-2">
+                                HTTP Method
+                            </label>
+                            <select
+                                value={httpMethod}
+                                onChange={(e) => setHttpMethod(e.target.value as any)}
+                                className="w-full"
+                                style={{
+                                    padding: '10px 14px',
+                                    border: '1px solid #d1d5db',
+                                    borderRadius: '8px',
+                                    fontSize: '14px',
+                                    outline: 'none',
+                                    background: '#fff',
+                                }}
+                            >
+                                <option value="POST">POST</option>
+                                <option value="GET">GET</option>
+                            </select>
                         </div>
 
                         {/* API Key */}
@@ -79,35 +239,206 @@ export default function SettingsPage() {
                                     fontSize: '14px',
                                     outline: 'none',
                                 }}
-                                onFocus={(e) => e.target.style.borderColor = '#3b82f6'}
-                                onBlur={(e) => e.target.style.borderColor = '#d1d5db'}
+                                onFocus={(e) => (e.target.style.borderColor = '#3b82f6')}
+                                onBlur={(e) => (e.target.style.borderColor = '#d1d5db')}
+                            />
+                            <div style={{ fontSize: 12, marginTop: 6, color: '#6b7280', lineHeight: 1.4 }}>
+                                Optional. If you provide one, it will be sent as <code>Authorization: Bearer ...</code>
+                            </div>
+                        </div>
+
+                        {/* Headers JSON */}
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-2">
+                                Headers (JSON)
+                            </label>
+                            <textarea
+                                value={headersJson}
+                                onChange={(e) => setHeadersJson(e.target.value)}
+                                className="w-full"
+                                rows={5}
+                                style={{
+                                    padding: '10px 14px',
+                                    border: '1px solid #d1d5db',
+                                    borderRadius: '8px',
+                                    fontSize: '13px',
+                                    outline: 'none',
+                                    fontFamily: 'monospace',
+                                }}
+                            />
+                        </div>
+
+                        {/* Request Template JSON */}
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-2">
+                                Request Template (JSON)
+                            </label>
+                            <textarea
+                                value={requestTemplateJson}
+                                onChange={(e) => setRequestTemplateJson(e.target.value)}
+                                className="w-full"
+                                rows={7}
+                                style={{
+                                    padding: '10px 14px',
+                                    border: '1px solid #d1d5db',
+                                    borderRadius: '8px',
+                                    fontSize: '13px',
+                                    outline: 'none',
+                                    fontFamily: 'monospace',
+                                }}
+                            />
+                            <div style={{ fontSize: 12, marginTop: 6, color: '#6b7280', lineHeight: 1.4 }}>
+                                Must contain: <code>{'{{PROMPT}}'}</code>
+                            </div>
+                        </div>
+
+                        {/* Response Path */}
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-2">
+                                Response Path (Dot Notation)
+                            </label>
+                            <input
+                                type="text"
+                                value={responsePath}
+                                onChange={(e) => setResponsePath(e.target.value)}
+                                className="w-full"
+                                style={{
+                                    padding: '10px 14px',
+                                    border: '1px solid #d1d5db',
+                                    borderRadius: '8px',
+                                    fontSize: '14px',
+                                    outline: 'none',
+                                }}
+                            />
+                            <div style={{ fontSize: 12, marginTop: 6, color: '#6b7280', lineHeight: 1.4 }}>
+                                Example: <code>choices.0.message.content</code> (OpenAI) or <code>response</code> (Ollama)
+                            </div>
+                        </div>
+
+                        {/* Test Prompt */}
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-2">
+                                Test Prompt
+                            </label>
+                            <input
+                                type="text"
+                                value={testPrompt}
+                                onChange={(e) => setTestPrompt(e.target.value)}
+                                className="w-full"
+                                style={{
+                                    padding: '10px 14px',
+                                    border: '1px solid #d1d5db',
+                                    borderRadius: '8px',
+                                    fontSize: '14px',
+                                    outline: 'none',
+                                }}
                             />
                         </div>
 
                         {/* Connection Test Button */}
                         <button
                             onClick={handleConnectionTest}
+                            disabled={testing}
                             className="transition-all duration-200"
                             style={{
-                                background: '#2563eb',
+                                background: testing ? '#93c5fd' : '#2563eb',
                                 color: 'white',
                                 padding: '10px 20px',
                                 borderRadius: '8px',
                                 fontSize: '14px',
                                 fontWeight: '600',
                                 border: 'none',
-                                cursor: 'pointer',
+                                cursor: testing ? 'not-allowed' : 'pointer',
                                 width: '100%',
+                                opacity: testing ? 0.85 : 1,
                             }}
                             onMouseEnter={(e) => {
-                                e.currentTarget.style.background = '#1d4ed8';
+                                if (!testing) e.currentTarget.style.background = '#1d4ed8';
                             }}
                             onMouseLeave={(e) => {
-                                e.currentTarget.style.background = '#2563eb';
+                                if (!testing) e.currentTarget.style.background = '#2563eb';
                             }}
                         >
-                            Connection Test
+                            {testing ? 'Testing...' : 'Connection Test'}
                         </button>
+
+                        {/* Connection Test Result */}
+                        {testResult ? (
+                            <div
+                                style={{
+                                    border: `1px solid ${testResult.ok ? '#86efac' : '#fca5a5'}`,
+                                    background: testResult.ok ? '#f0fdf4' : '#fef2f2',
+                                    borderRadius: 10,
+                                    padding: 14,
+                                    marginTop: 6,
+                                }}
+                            >
+                                <div
+                                    style={{
+                                        fontWeight: 700,
+                                        fontSize: 13,
+                                        color: testResult.ok ? '#166534' : '#991b1b',
+                                        marginBottom: 6,
+                                    }}
+                                >
+                                    {testResult.ok ? '✅ Connector Test Successful' : '❌ Connector Test Failed'}
+                                </div>
+
+                                <div style={{ fontSize: 13, color: '#111827', lineHeight: 1.4 }}>
+                                    {testResult.message}
+                                </div>
+
+                                {typeof testResult.latency_ms === 'number' ? (
+                                    <div style={{ fontSize: 12, color: '#6b7280', marginTop: 8 }}>
+                                        Latency: <b>{testResult.latency_ms} ms</b>
+                                    </div>
+                                ) : null}
+
+                                {testResult.extracted_response ? (
+                                    <div style={{ marginTop: 10 }}>
+                                        <div style={{ fontSize: 12, color: '#6b7280', fontWeight: 700, marginBottom: 4 }}>
+                                            Extracted Response
+                                        </div>
+                                        <div
+                                            style={{
+                                                background: '#ffffff',
+                                                border: '1px solid #e5e7eb',
+                                                borderRadius: 8,
+                                                padding: 10,
+                                                fontSize: 12,
+                                                fontFamily: 'monospace',
+                                                whiteSpace: 'pre-wrap',
+                                            }}
+                                        >
+                                            {testResult.extracted_response}
+                                        </div>
+                                    </div>
+                                ) : null}
+
+                                {testResult.raw_preview ? (
+                                    <div style={{ marginTop: 10 }}>
+                                        <div style={{ fontSize: 12, color: '#6b7280', fontWeight: 700, marginBottom: 4 }}>
+                                            Raw Response Preview
+                                        </div>
+                                        <div
+                                            style={{
+                                                background: '#ffffff',
+                                                border: '1px solid #e5e7eb',
+                                                borderRadius: 8,
+                                                padding: 10,
+                                                fontSize: 12,
+                                                fontFamily: 'monospace',
+                                                whiteSpace: 'pre-wrap',
+                                                maxHeight: 140,
+                                                overflow: 'auto',
+                                            }}
+                                        >
+                                            {testResult.raw_preview}
+                                        </div>
+                                    </div>
+                                ) : null}
+                            </div>
+                        ) : null}
                     </div>
                 </SettingsCard>
 
@@ -224,8 +555,8 @@ export default function SettingsPage() {
                                     fontSize: '14px',
                                     outline: 'none',
                                 }}
-                                onFocus={(e) => e.target.style.borderColor = '#3b82f6'}
-                                onBlur={(e) => e.target.style.borderColor = '#d1d5db'}
+                                onFocus={(e) => (e.target.style.borderColor = '#3b82f6')}
+                                onBlur={(e) => (e.target.style.borderColor = '#d1d5db')}
                             />
                         </div>
 
@@ -246,8 +577,8 @@ export default function SettingsPage() {
                                     fontSize: '14px',
                                     outline: 'none',
                                 }}
-                                onFocus={(e) => e.target.style.borderColor = '#3b82f6'}
-                                onBlur={(e) => e.target.style.borderColor = '#d1d5db'}
+                                onFocus={(e) => (e.target.style.borderColor = '#3b82f6')}
+                                onBlur={(e) => (e.target.style.borderColor = '#d1d5db')}
                             />
                         </div>
 

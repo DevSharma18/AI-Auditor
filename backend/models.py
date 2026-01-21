@@ -1,6 +1,15 @@
+# backend/models.py
+
 from sqlalchemy import (
-    Column, Integer, String, Float, Boolean,
-    DateTime, ForeignKey, JSON
+    Column,
+    Integer,
+    String,
+    Float,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    JSON,
+    Text,
 )
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -9,10 +18,8 @@ import enum
 from .database import Base
 
 
-
-
 # =========================
-# ENUMS (UNCHANGED)
+# ENUMS
 # =========================
 
 class ModelType(str, enum.Enum):
@@ -68,38 +75,34 @@ class AIModel(Base):
 
     id = Column(Integer, primary_key=True, index=True)
 
-    # frontend-visible ID
     model_id = Column(String, unique=True, index=True, nullable=False)
-
     name = Column(String, nullable=False)
     version = Column(String, default="1.0")
 
-    # 🔑 REQUIRED for frontend + future providers
-    model_type = Column(String, default="llm")           # llm / ml / vision
-    connection_type = Column(String, default="api")      # api / logs / batch
+    model_type = Column(String, default="llm")
+    connection_type = Column(String, default="api")
 
     description = Column(String, nullable=True)
     is_active = Column(Boolean, default=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
 
-    # relationships
     evidence_sources = relationship(
         "EvidenceSource",
         back_populates="model",
-        cascade="all, delete-orphan"
+        cascade="all, delete-orphan",
     )
 
     audit_policies = relationship(
         "AuditPolicy",
         back_populates="model",
-        cascade="all, delete-orphan"
+        cascade="all, delete-orphan",
     )
 
     audit_runs = relationship(
         "AuditRun",
         back_populates="model",
-        cascade="all, delete-orphan"
+        cascade="all, delete-orphan",
     )
 
 
@@ -144,8 +147,8 @@ class AuditPolicy(Base):
             "bias": True,
             "risk": True,
             "compliance": True,
-            "active_security": False
-        }
+            "active_security": False,
+        },
     )
 
     policy_reference = Column(JSON, default={})
@@ -176,16 +179,30 @@ class AuditRun(Base):
     audit_result = Column(String, default="AUDIT_PASS")
 
     model = relationship("AIModel", back_populates="audit_runs")
+
     summary = relationship(
         "AuditSummary",
         back_populates="audit_run",
         uselist=False,
-        cascade="all, delete-orphan"
+        cascade="all, delete-orphan",
     )
+
     findings = relationship(
         "AuditFinding",
         back_populates="audit_run",
-        cascade="all, delete-orphan"
+        cascade="all, delete-orphan",
+    )
+
+    metric_scores = relationship(
+        "AuditMetricScore",
+        back_populates="audit_run",
+        cascade="all, delete-orphan",
+    )
+
+    interactions = relationship(
+        "AuditInteraction",
+        back_populates="audit_run",
+        cascade="all, delete-orphan",
     )
 
 
@@ -201,7 +218,7 @@ class AuditSummary(Base):
 
     drift_score = Column(Float, nullable=True)
     bias_score = Column(Float, nullable=True)
-    risk_score = Column(Float, nullable=True)
+    risk_score = Column(Float, nullable=True)  # global severity score out of 100
 
     total_findings = Column(Integer, default=0)
     critical_findings = Column(Integer, default=0)
@@ -213,7 +230,40 @@ class AuditSummary(Base):
 
 
 # =========================
-# FINDINGS
+# AUDIT METRIC SCORE (NEW)
+# =========================
+
+class AuditMetricScore(Base):
+    __tablename__ = "audit_metric_scores"
+
+    id = Column(Integer, primary_key=True, index=True)
+    audit_id = Column(Integer, ForeignKey("audit_runs.id"), nullable=False, index=True)
+
+    metric_name = Column(String, nullable=False, index=True)
+
+    likelihood = Column(Float, nullable=False, default=0.0)         # L ∈ [0,1]
+    impact = Column(Float, nullable=False, default=0.0)             # I ∈ [0,1]
+    regulatory_weight = Column(Float, nullable=False, default=0.0)  # R ∈ [0,1]
+
+    alpha = Column(Float, nullable=False, default=1.0)
+    beta = Column(Float, nullable=False, default=1.5)
+
+    severity_score = Column(Float, nullable=False, default=0.0)      # S ∈ [0,1]
+    severity_score_100 = Column(Float, nullable=False, default=0.0)  # 0–100
+    severity_band = Column(String, nullable=False, default="LOW")
+
+    strategic_weight = Column(Float, nullable=False, default=1.0)  # w_m
+
+    framework_breakdown = Column(JSON, nullable=True)  # gdpr/eu_ai_act/owasp_ai
+    signals = Column(JSON, nullable=True)              # frequency ratios, reproducibility, etc.
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    audit_run = relationship("AuditRun", back_populates="metric_scores")
+
+
+# =========================
+# FINDINGS (with evidence mapping)
 # =========================
 
 class AuditFinding(Base):
@@ -223,6 +273,12 @@ class AuditFinding(Base):
     finding_id = Column(String, unique=True, index=True, nullable=False)
 
     audit_id = Column(Integer, ForeignKey("audit_runs.id"), nullable=False)
+
+    # ✅ Prompt evidence mapping (NEW)
+    prompt_id = Column(String, nullable=True, index=True)
+
+    # ✅ Link to AuditInteraction row (NEW)
+    interaction_id = Column(Integer, ForeignKey("audit_interactions.id"), nullable=True, index=True)
 
     category = Column(String, nullable=False)
     rule_id = Column(String, nullable=True)
@@ -237,6 +293,7 @@ class AuditFinding(Base):
     description = Column(String, nullable=True)
 
     audit_run = relationship("AuditRun", back_populates="findings")
+    interaction = relationship("AuditInteraction", back_populates="findings")
 
 
 # =========================
@@ -249,26 +306,30 @@ class PromptTest(Base):
     id = Column(Integer, primary_key=True)
     model_id = Column(Integer, ForeignKey("ai_models.id"), nullable=False)
 
-    category = Column(String)  # bias / hallucination / pii / jailbreak
+    category = Column(String)
     prompt = Column(String, nullable=False)
     expected_behavior = Column(String, nullable=True)
 
     model = relationship("AIModel", backref="prompt_tests")
 
-from sqlalchemy import Text, Float, DateTime, ForeignKey
-from datetime import datetime
+
+# =========================
+# AUDIT INTERACTIONS
+# =========================
 
 class AuditInteraction(Base):
     __tablename__ = "audit_interactions"
 
     id = Column(Integer, primary_key=True, index=True)
 
-    # FK to audit_runs.id
     audit_id = Column(Integer, ForeignKey("audit_runs.id"), index=True, nullable=True)
 
-    prompt_id = Column(String, nullable=False)
+    prompt_id = Column(String, nullable=False, index=True)
     prompt = Column(Text, nullable=False)
     response = Column(Text, nullable=False)
 
     latency = Column(Float)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+    audit_run = relationship("AuditRun", back_populates="interactions")
+    findings = relationship("AuditFinding", back_populates="interaction")

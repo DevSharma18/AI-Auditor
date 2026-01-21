@@ -1,10 +1,7 @@
 'use client';
 
-import { useState } from 'react';
-
-const API_BASE =
-    process.env.NEXT_PUBLIC_API_BASE_URL ??
-    'http://127.0.0.1:8000/api';
+import React, { useState } from 'react';
+import { apiPost } from '@/lib/api-client';
 
 interface Props {
     onClose: () => void;
@@ -32,62 +29,49 @@ export default function AddModelModal({ onClose, onSuccess }: Props) {
 
         setLoading(true);
 
-        // -----------------------------
-        // Build provider-agnostic request_template
-        // -----------------------------
-        const request_template: any = {
-            temperature: form.temperature,
-        };
+        try {
+            // -----------------------------
+            // Build provider-agnostic request_template
+            // -----------------------------
+            const request_template: any = {
+                temperature: form.temperature,
+            };
 
-        // Providers that require model + messages
-        if (form.model) {
-            request_template.model = form.model;
-            request_template.messages = [
-                { role: 'user', content: '{{PROMPT}}' },
-            ];
-        } else {
-            // Generic / local fallback
-            request_template.input = '{{PROMPT}}';
-        }
-
-        const payload = {
-            model_id: form.model_id,
-            name: form.name,
-            endpoint: form.endpoint,
-            method: 'POST',
-            headers: form.api_key
-                ? {
-                    Authorization: `Bearer ${form.api_key}`,
-                    'Content-Type': 'application/json',
-                }
-                : {
-                    'Content-Type': 'application/json',
-                },
-            request_template,
-            response_path: form.model
-                ? 'choices[0].message.content'
-                : 'output',
-        };
-
-        const res = await fetch(
-            `${API_BASE}/models/register-with-connector`,
-            {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload),
+            // Providers that require model + messages
+            if (form.model) {
+                request_template.model = form.model;
+                request_template.messages = [{ role: 'user', content: '{{PROMPT}}' }];
+            } else {
+                // Generic / local fallback
+                request_template.input = '{{PROMPT}}';
             }
-        );
 
-        setLoading(false);
+            const payload = {
+                model_id: form.model_id,
+                name: form.name,
+                endpoint: form.endpoint,
+                method: 'POST',
+                headers: form.api_key
+                    ? {
+                          Authorization: `Bearer ${form.api_key}`,
+                          'Content-Type': 'application/json',
+                      }
+                    : {
+                          'Content-Type': 'application/json',
+                      },
+                request_template,
+                response_path: form.model ? 'choices[0].message.content' : 'output',
+            };
 
-        if (!res.ok) {
-            const text = await res.text();
-            alert(`Registration failed:\n${text}`);
-            return;
+            await apiPost('/models/register-with-connector', payload);
+
+            onSuccess();
+            onClose();
+        } catch (e: any) {
+            alert(`Registration failed:\n${e?.message || 'Unknown error'}`);
+        } finally {
+            setLoading(false);
         }
-
-        onSuccess();
-        onClose();
     }
 
     return (
@@ -119,26 +103,22 @@ export default function AddModelModal({ onClose, onSuccess }: Props) {
                 <label>Model Nickname *</label>
                 <input
                     style={input}
-                    onChange={(e) =>
-                        setForm({ ...form, name: e.target.value })
-                    }
+                    value={form.name}
+                    onChange={(e) => setForm({ ...form, name: e.target.value })}
                 />
 
                 <label>Model ID *</label>
                 <input
                     style={input}
-                    onChange={(e) =>
-                        setForm({ ...form, model_id: e.target.value })
-                    }
+                    value={form.model_id}
+                    onChange={(e) => setForm({ ...form, model_id: e.target.value })}
                 />
 
                 <label>Provider</label>
                 <select
                     style={input}
                     value={form.provider}
-                    onChange={(e) =>
-                        setForm({ ...form, provider: e.target.value })
-                    }
+                    onChange={(e) => setForm({ ...form, provider: e.target.value })}
                 >
                     <option value="openai">OpenAI</option>
                     <option value="anthropic">Anthropic</option>
@@ -151,27 +131,24 @@ export default function AddModelModal({ onClose, onSuccess }: Props) {
                 <input
                     style={input}
                     placeholder="e.g. gpt-4o-mini, claude-3-opus"
-                    onChange={(e) =>
-                        setForm({ ...form, model: e.target.value })
-                    }
+                    value={form.model}
+                    onChange={(e) => setForm({ ...form, model: e.target.value })}
                 />
 
                 <label>API Endpoint *</label>
                 <input
                     style={input}
                     placeholder="https://api.openai.com/v1/chat/completions"
-                    onChange={(e) =>
-                        setForm({ ...form, endpoint: e.target.value })
-                    }
+                    value={form.endpoint}
+                    onChange={(e) => setForm({ ...form, endpoint: e.target.value })}
                 />
 
                 <label>API Key (optional)</label>
                 <input
                     type="password"
                     style={input}
-                    onChange={(e) =>
-                        setForm({ ...form, api_key: e.target.value })
-                    }
+                    value={form.api_key}
+                    onChange={(e) => setForm({ ...form, api_key: e.target.value })}
                 />
 
                 <label>Temperature</label>

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from typing import Dict, Any, List
 from io import BytesIO
+from typing import Any, Dict, List
 
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import cm
 from reportlab.lib import colors
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.platypus import (
     SimpleDocTemplate,
     Paragraph,
@@ -14,42 +15,57 @@ from reportlab.platypus import (
     TableStyle,
     PageBreak,
 )
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
 
 def _severity_color(sev: str):
-    s = (sev or "").upper()
+    s = (sev or "").upper().strip()
     if s == "CRITICAL":
-        return colors.HexColor("#dc2626")
+        return colors.HexColor("#991b1b")
+    if s == "SEVERE":
+        return colors.HexColor("#9a3412")
     if s == "HIGH":
-        return colors.HexColor("#f97316")
+        return colors.HexColor("#9a3412")
+    if s == "MODERATE":
+        return colors.HexColor("#92400e")
     if s == "MEDIUM":
-        return colors.HexColor("#f59e0b")
+        return colors.HexColor("#92400e")
     if s == "LOW":
-        return colors.HexColor("#16a34a")
-    return colors.HexColor("#6b7280")
+        return colors.HexColor("#166534")
+    return colors.HexColor("#374151")
 
 
 def generate_audit_pdf_bytes(structured_report: Dict[str, Any]) -> bytes:
     """
-    Produces a professional PDF as bytes using ReportLab.
-    No system libs required.
+    Professional PDF:
+    - Executive summary
+    - Dynamic scoring (global + metric)
+    - Metadata
+    - Grouped findings only
+    - Occurrences count
+    - Limited evidence samples (1–3)
+    No raw dump of all interactions.
     """
-    audit = structured_report.get("audit", {}) or {}
-    counts = structured_report.get("counts", {}) or {}
-    executive_summary = structured_report.get("executive_summary", []) or []
-    findings: List[Dict[str, Any]] = structured_report.get("findings", []) or []
-    interactions: List[Dict[str, Any]] = structured_report.get("interactions", []) or []
 
-    buffer = BytesIO()
+    audit = structured_report.get("audit", {}) or {}
+    summary = structured_report.get("summary", {}) or {}
+    executive_summary = structured_report.get("executive_summary", []) or []
+
+    global_risk = structured_report.get("global_risk", {}) or {}
+    metric_scores: List[Dict[str, Any]] = structured_report.get("metric_scores", []) or []
+
+    grouped_findings: List[Dict[str, Any]] = structured_report.get("grouped_findings", []) or []
+    evidence_samples: List[Dict[str, Any]] = structured_report.get("evidence_samples", []) or []
+
+    buf = BytesIO()
+
     doc = SimpleDocTemplate(
-        buffer,
+        buf,
         pagesize=A4,
         leftMargin=1.5 * cm,
         rightMargin=1.5 * cm,
         topMargin=1.5 * cm,
         bottomMargin=1.5 * cm,
-        title="AI Auditor Report",
+        title="AI Auditor Executive Report",
         author="AI Auditor Platform",
     )
 
@@ -73,60 +89,118 @@ def generate_audit_pdf_bytes(structured_report: Dict[str, Any]) -> bytes:
     normal_style = ParagraphStyle(
         "NormalSmall",
         parent=styles["BodyText"],
-        fontSize=9,
+        fontSize=9.5,
         leading=12,
+        textColor=colors.HexColor("#111827"),
     )
 
     subtle_style = ParagraphStyle(
         "Subtle",
         parent=styles["BodyText"],
         fontSize=9,
-        textColor=colors.HexColor("#6b7280"),
         leading=12,
+        textColor=colors.HexColor("#6b7280"),
     )
 
-    story = []
+    story: List[Any] = []
 
-    # ==========================
-    # TITLE
-    # ==========================
-    story.append(Paragraph("AI Auditor Report", title_style))
+    # =========================================
+    # HEADER
+    # =========================================
+    story.append(Paragraph("AI Auditor Executive Report", title_style))
     story.append(Paragraph(f"Audit ID: <b>{audit.get('audit_id', '-')}</b>", subtle_style))
     story.append(Spacer(1, 10))
 
-    # ==========================
+    # =========================================
     # EXECUTIVE SUMMARY
-    # ==========================
+    # =========================================
     story.append(Paragraph("Executive Summary", section_style))
     if executive_summary:
         for line in executive_summary:
-            story.append(Paragraph(f"- {line}", normal_style))
+            story.append(Paragraph(f"• {line}", normal_style))
     else:
         story.append(Paragraph("No executive summary available.", normal_style))
-    story.append(Spacer(1, 10))
+    story.append(Spacer(1, 12))
 
-    # ==========================
-    # METADATA TABLE
-    # ==========================
+    # =========================================
+    # DYNAMIC SCORING
+    # =========================================
+    story.append(Paragraph("Dynamic Risk Scoring", section_style))
+
+    gs = global_risk.get("score_100")
+    gb = global_risk.get("band")
+
+    story.append(
+        Paragraph(
+            f"<b>Global risk score:</b> {gs if gs is not None else '-'} / 100 "
+            f"(<b>{gb or 'UNKNOWN'}</b>)",
+            normal_style,
+        )
+    )
+    story.append(Spacer(1, 8))
+
+    if metric_scores:
+        rows = [["Metric", "Score (0–100)", "Band", "L", "I", "R"]]
+        for m in metric_scores:
+            rows.append(
+                [
+                    str(m.get("metric", "-")).upper(),
+                    str(m.get("score_100", "-")),
+                    str(m.get("band", "-")),
+                    str(round(float(m.get("L", 0.0) or 0.0), 2)),
+                    str(round(float(m.get("I", 0.0) or 0.0), 2)),
+                    str(round(float(m.get("R", 0.0) or 0.0), 2)),
+                ]
+            )
+
+        tbl = Table(rows, colWidths=[3.0 * cm, 3.2 * cm, 2.6 * cm, 2.0 * cm, 2.0 * cm, 2.0 * cm])
+        tbl.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f9fafb")),
+                    ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#e5e7eb")),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE", (0, 0), (-1, 0), 8.5),
+                    ("FONTSIZE", (0, 1), (-1, -1), 8.0),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("TEXTCOLOR", (0, 0), (-1, -1), colors.HexColor("#111827")),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                    ("TOPPADDING", (0, 0), (-1, -1), 5),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ]
+            )
+        )
+        story.append(tbl)
+    else:
+        story.append(Paragraph("No metric scoring available for this audit.", subtle_style))
+
+    story.append(Spacer(1, 14))
+
+    # =========================================
+    # METADATA
+    # =========================================
     story.append(Paragraph("Audit Metadata", section_style))
-    meta_data = [
-        ["Model", f"{audit.get('model_name', '-') } ({audit.get('model_frontend_id', '-')})"],
+
+    meta_rows = [
+        ["Model Name", str(audit.get("model_name", "-"))],
+        ["Model ID", str(audit.get("model_frontend_id", "-"))],
+        ["Audit Type", str(audit.get("audit_type", "-"))],
         ["Executed At", str(audit.get("executed_at", "-"))],
-        ["Audit Result", str(audit.get("audit_result", "-"))],
         ["Execution Status", str(audit.get("execution_status", "-"))],
-        ["Total Findings", str(counts.get("findings_total", 0))],
-        ["Evidence Interactions", str(counts.get("interactions_total", 0))],
+        ["Audit Result", str(audit.get("audit_result", "-"))],
+        ["Raw Findings", str(summary.get("total_findings_raw", 0))],
+        ["Unique Issues", str(structured_report.get("unique_issue_count", 0))],
     ]
 
-    meta_table = Table(meta_data, colWidths=[5 * cm, 12 * cm])
+    meta_table = Table(meta_rows, colWidths=[5.0 * cm, 12.0 * cm])
     meta_table.setStyle(
         TableStyle(
             [
                 ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#f9fafb")),
-                ("TEXTCOLOR", (0, 0), (-1, -1), colors.HexColor("#111827")),
                 ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#e5e7eb")),
-                ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
                 ("FONTSIZE", (0, 0), (-1, -1), 9),
+                ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ("LEFTPADDING", (0, 0), (-1, -1), 6),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 6),
@@ -138,38 +212,34 @@ def generate_audit_pdf_bytes(structured_report: Dict[str, Any]) -> bytes:
     story.append(meta_table)
     story.append(Spacer(1, 14))
 
-    # ==========================
-    # FINDINGS TABLE
-    # ==========================
-    story.append(Paragraph("Findings", section_style))
+    # =========================================
+    # GROUPED FINDINGS
+    # =========================================
+    story.append(Paragraph("Grouped Findings (Deduplicated)", section_style))
 
-    if not findings:
+    if not grouped_findings:
         story.append(Paragraph("No findings recorded in this audit.", normal_style))
     else:
-        rows = [["Finding ID", "Category", "Severity", "Metric", "Description"]]
+        rows = [["Category", "Severity", "Metric", "Occurrences", "Description"]]
 
-        for f in findings:
+        for f in grouped_findings:
             rows.append(
                 [
-                    str(f.get("finding_id", "-")),
-                    str(f.get("category", "-")).upper(),
-                    str(f.get("severity", "-")).upper(),
+                    str(f.get("category", "-")),
+                    str(f.get("severity", "-")),
                     str(f.get("metric_name", "-")),
+                    str(f.get("occurrences", 0)),
                     str(f.get("description", "-")),
                 ]
             )
 
-        findings_table = Table(
-            rows,
-            colWidths=[3.0 * cm, 2.5 * cm, 2.5 * cm, 3.2 * cm, 7.8 * cm],
-        )
-
+        tbl = Table(rows, colWidths=[2.4 * cm, 2.2 * cm, 3.0 * cm, 2.2 * cm, 7.2 * cm])
         style_cmds = [
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f9fafb")),
             ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#e5e7eb")),
             ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTSIZE", (0, 0), (-1, 0), 8),
-            ("FONTSIZE", (0, 1), (-1, -1), 7.5),
+            ("FONTSIZE", (0, 0), (-1, 0), 8.5),
+            ("FONTSIZE", (0, 1), (-1, -1), 7.8),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ("TEXTCOLOR", (0, 0), (-1, -1), colors.HexColor("#111827")),
             ("LEFTPADDING", (0, 0), (-1, -1), 5),
@@ -178,60 +248,83 @@ def generate_audit_pdf_bytes(structured_report: Dict[str, Any]) -> bytes:
             ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
         ]
 
-        for idx, f in enumerate(findings, start=1):
+        for idx, f in enumerate(grouped_findings, start=1):
             sev_col = _severity_color(f.get("severity"))
-            style_cmds.append(("TEXTCOLOR", (2, idx), (2, idx), sev_col))
-            style_cmds.append(("FONTNAME", (2, idx), (2, idx), "Helvetica-Bold"))
+            style_cmds.append(("TEXTCOLOR", (1, idx), (1, idx), sev_col))
+            style_cmds.append(("FONTNAME", (1, idx), (1, idx), "Helvetica-Bold"))
 
-        findings_table.setStyle(TableStyle(style_cmds))
-        story.append(findings_table)
-
-        story.append(Spacer(1, 12))
-
-        # ==========================
-        # DETAILED GUIDANCE
-        # ==========================
-        story.append(Paragraph("Detailed Guidance", section_style))
-
-        for f in findings:
-            explain = f.get("explain", {}) or {}
-            remediation = f.get("remediation", {}) or {}
-            steps = remediation.get("fix_steps", []) or []
-
-            story.append(
-                Paragraph(
-                    f"<b>{f.get('finding_id','-')}</b> — {explain.get('title','Risk Finding')}",
-                    normal_style,
-                )
-            )
-            story.append(Paragraph(f"<b>Meaning:</b> {explain.get('simple_definition','-')}", normal_style))
-            story.append(Paragraph(f"<b>Why it matters:</b> {explain.get('why_it_matters','-')}", normal_style))
-
-            owner = remediation.get("recommended_owner")
-            if owner:
-                story.append(Paragraph(f"<b>Recommended owner:</b> {owner}", normal_style))
-
-            if steps:
-                story.append(Paragraph("<b>Fix steps:</b>", normal_style))
-                for s in steps[:8]:
-                    story.append(Paragraph(f"- {s}", normal_style))
-
-            story.append(Spacer(1, 8))
+        tbl.setStyle(TableStyle(style_cmds))
+        story.append(tbl)
 
     story.append(PageBreak())
 
-    # ==========================
-    # EVIDENCE
-    # ==========================
-    story.append(Paragraph("Evidence (Prompt/Response Interactions)", section_style))
+    # =========================================
+    # GUIDANCE
+    # =========================================
+    story.append(Paragraph("Guidance and Remediation", section_style))
 
-    if not interactions:
-        story.append(Paragraph("No interactions recorded for this audit.", normal_style))
+    if not grouped_findings:
+        story.append(Paragraph("No issues to remediate.", normal_style))
     else:
-        for i in interactions[:25]:
+        for f in grouped_findings:
+            explain = f.get("explain") or {}
+            remediation = f.get("remediation") or {}
+            steps = remediation.get("fix_steps") or []
+
             story.append(
                 Paragraph(
-                    f"<b>Prompt ID:</b> {i.get('prompt_id','-')}    <b>Latency:</b> {i.get('latency_ms','-')} ms",
+                    f"<b>{f.get('category','-')}</b> — <b>{f.get('metric_name','-')}</b> "
+                    f"(Severity: <b>{f.get('severity','-')}</b>, Occurrences: <b>{f.get('occurrences',0)}</b>)",
+                    normal_style,
+                )
+            )
+            story.append(Spacer(1, 4))
+            story.append(Paragraph(f"<b>Issue:</b> {f.get('description','-')}", normal_style))
+            story.append(Spacer(1, 4))
+
+            if explain:
+                story.append(Paragraph(f"<b>What it means:</b> {explain.get('simple_definition','-')}", normal_style))
+                story.append(Paragraph(f"<b>Why it matters:</b> {explain.get('why_it_matters','-')}", normal_style))
+
+            owner = remediation.get("recommended_owner")
+            priority = remediation.get("priority")
+            if owner or priority:
+                story.append(
+                    Paragraph(
+                        f"<b>Owner:</b> {owner or '-'} &nbsp;&nbsp; <b>Priority:</b> {priority or '-'}",
+                        subtle_style,
+                    )
+                )
+
+            if steps:
+                story.append(Paragraph("<b>Recommended Fix Steps:</b>", normal_style))
+                for s in steps[:8]:
+                    story.append(Paragraph(f"• {s}", normal_style))
+
+            story.append(Spacer(1, 10))
+
+    story.append(PageBreak())
+
+    # =========================================
+    # LIMITED EVIDENCE SAMPLES
+    # =========================================
+    story.append(Paragraph("Evidence Samples (Limited)", section_style))
+    story.append(
+        Paragraph(
+            "This section includes only a small sample of audit evidence to keep reporting clean and executive-friendly.",
+            subtle_style,
+        )
+    )
+    story.append(Spacer(1, 10))
+
+    if not evidence_samples:
+        story.append(Paragraph("No evidence samples available.", normal_style))
+    else:
+        for i in evidence_samples[:3]:
+            story.append(
+                Paragraph(
+                    f"<b>Prompt ID:</b> {i.get('prompt_id','-')} &nbsp;&nbsp; "
+                    f"<b>Latency:</b> {i.get('latency_ms','-')} ms",
                     subtle_style,
                 )
             )
@@ -244,6 +337,7 @@ def generate_audit_pdf_bytes(structured_report: Dict[str, Any]) -> bytes:
             story.append(Spacer(1, 12))
 
     doc.build(story)
-    pdf = buffer.getvalue()
-    buffer.close()
-    return pdf
+
+    pdf_bytes = buf.getvalue()
+    buf.close()
+    return pdf_bytes

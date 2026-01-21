@@ -1,25 +1,42 @@
+# backend/audit_engine.py
+
+from __future__ import annotations
+
 import uuid
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
 from .models import (
     AIModel,
     AuditRun,
-    AuditSummary,
     AuditFinding,
-    EvidenceSource,
     AuditInteraction,
+    AuditMetricScore,
+    AuditSummary,
+    EvidenceSource,
 )
 
 from .model_executor import ModelExecutor
 from .audit_prompts import PROMPT_CATEGORIES
 
-from .metrics.hallucination import HallucinationMetric
+# ✅ Metrics (prompt-agnostic)
 from .metrics.bias import BiasMetric
 from .metrics.pii import PIIMetric
+from .metrics.hallucination import HallucinationMetric
+from .metrics.compliance import ComplianceMetric
+from .metrics.drift import DriftMetric
 
+# ✅ Enterprise scoring
+from .scoring.normalization import IMPACT_BASELINES, clamp01
+from .scoring.metrics import MetricScore, normalize_likelihood
+from .scoring.regulatory_engine import compute_regulatory_weight
+from .scoring.severity_engine import (
+    score_metric_severity,
+    score_global_severity,
+    severity_band_from_score_100,
+)
 
 CATEGORY_MAP = {
     "bias": "bias",
@@ -33,8 +50,95 @@ CATEGORY_MAP = {
     "drift": "drift",
 }
 
+METRIC_FAMILIES = ["bias", "pii", "hallucination", "compliance", "drift"]
+
+
+def _norm(name: str) -> str:
+    return (name or "").strip().lower()
+
+
+def _metric_family(category: str, metric_name: str) -> str:
+    """
+    Normalize everything into stable metric families:
+    bias/pii/hallucination/compliance/drift
+    """
+    c = _norm(category)
+    m = _norm(metric_name)
+
+    # Prefer metric_name if it already matches
+    if m in METRIC_FAMILIES:
+        return m
+
+    # If metric_name has prefixes like pii_email_detected etc.
+    for fam in METRIC_FAMILIES:
+        if m.startswith(fam + "_"):
+            return fam
+
+    # Else rely on category
+    if c in METRIC_FAMILIES:
+        return c
+
+    return "compliance"
+
+
+def _compute_likelihood(
+    findings: List[Dict[str, Any]],
+    interactions_count: int,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Enterprise L calculation:
+    frequency = findings_of_metric_family / interactions
+    L = normalize_likelihood(frequency)
+    """
+    per_metric_count: Dict[str, int] = {}
+
+    for f in findings:
+        fam = _metric_family(f.get("category", ""), f.get("metric_name", ""))
+        per_metric_count[fam] = per_metric_count.get(fam, 0) + 1
+
+    denom = max(1, int(interactions_count))
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for metric, cnt in per_metric_count.items():
+        freq_ratio = float(cnt / denom)
+        freq_ratio = float(min(freq_ratio, 1.0))
+
+        L = float(normalize_likelihood(freq_ratio))
+
+        out[metric] = {
+            "L": L,
+            "signals": {
+                "finding_count": int(cnt),
+                "interactions": int(interactions_count),
+                "frequency_ratio": round(freq_ratio, 4),
+            },
+        }
+
+    # Ensure all metric families exist even if 0
+    for fam in METRIC_FAMILIES:
+        if fam not in out:
+            out[fam] = {
+                "L": 0.0,
+                "signals": {
+                    "finding_count": 0,
+                    "interactions": int(interactions_count),
+                    "frequency_ratio": 0.0,
+                },
+            }
+
+    return out
+
 
 class AuditEngine:
+    """
+    ✅ Enterprise Active Audit Engine
+
+    - Executes prompt suite from PROMPT_CATEGORIES
+    - Evaluates metrics (bias/pii/hallucination/compliance/drift)
+    - Stores AuditInteraction + AuditFinding (with evidence mapping)
+    - Computes per-metric and global enterprise severity scoring
+    """
+
     def __init__(self, db: Session):
         self.db = db
 
@@ -42,85 +146,113 @@ class AuditEngine:
             "hallucination": HallucinationMetric(),
             "bias": BiasMetric(),
             "pii": PIIMetric(),
+            "compliance": ComplianceMetric(),
+            "drift": DriftMetric(),
         }
 
     def run_active_audit(self, model: AIModel, policy=None) -> AuditRun:
         audit_public_id = f"active_{uuid.uuid4().hex[:12]}"
 
-        # ✅ pick the connector
+        # ---------------------------------------------------------
+        # Evidence source validation (required)
+        # ---------------------------------------------------------
         evidence = (
             self.db.query(EvidenceSource)
-            .filter(EvidenceSource.model_id == model.id, EvidenceSource.source_type == "api")
+            .filter(
+                EvidenceSource.model_id == model.id,
+                EvidenceSource.source_type == "api",
+            )
             .first()
         )
-
         if not evidence:
             raise RuntimeError("No EvidenceSource configured for this model")
 
         executor = ModelExecutor(evidence.config)
 
-        interactions: List[Dict] = []
-        findings: List[Dict] = []
+        interactions_buffer: List[Dict[str, Any]] = []
+        findings_buffer: List[Dict[str, Any]] = []
 
         prompts_executed = 0
-        total_latency = 0.0
+        total_latency_seconds = 0.0
 
+        # ---------------------------------------------------------
+        # Run prompt suite
+        # ---------------------------------------------------------
         for category, prompts in PROMPT_CATEGORIES.items():
             metric = self.metric_registry.get(category)
 
+            if not isinstance(prompts, list):
+                continue
+
             for p in prompts:
-                # -----------------------------
-                # Execute prompt against provider
-                # -----------------------------
+                prompt_id = str(p.get("id") or f"{category}_{uuid.uuid4().hex[:6]}")
+                prompt_text = str(p.get("prompt") or "")
+
+                if not prompt_text.strip():
+                    continue
+
+                # Execute prompt
                 try:
-                    execution = executor.execute_active_prompt(p["prompt"])
+                    execution = executor.execute_active_prompt(prompt_text)
+
                     response_text = execution.get("raw_response", "")
                     latency_seconds = float(execution.get("latency", 0.0))
                 except Exception as exc:
-                    # store a finding for operational visibility
-                    findings.append(
+                    # Execution failures count under compliance
+                    findings_buffer.append(
                         {
                             "category": "compliance",
                             "severity": "HIGH",
                             "metric_name": "execution_failure",
                             "description": str(exc),
+                            "prompt_id": prompt_id,
                         }
                     )
                     continue
 
                 prompts_executed += 1
-                total_latency += latency_seconds
+                total_latency_seconds += latency_seconds
 
-                interactions.append(
+                # Store interaction in memory (persist later)
+                interactions_buffer.append(
                     {
-                        "prompt_id": p["id"],
-                        "prompt": p["prompt"],
+                        "prompt_id": prompt_id,
+                        "prompt": prompt_text,
                         "response": response_text if isinstance(response_text, str) else str(response_text),
-                        "latency": round(latency_seconds * 1000, 2),  # store ms
+                        "latency_ms": round(latency_seconds * 1000, 2),
                     }
                 )
 
-                # -----------------------------
-                # Metric evaluation (prompt-agnostic)
-                # -----------------------------
+                # Evaluate metric signals
                 if metric:
-                    result = metric.evaluate(prompt=p["prompt"], response=response_text)
+                    result = metric.evaluate(prompt=prompt_text, response=str(response_text or ""))
 
-                    if result:
-                        findings.append(
+                    results_list: List[Any] = []
+                    if result is None:
+                        results_list = []
+                    elif isinstance(result, list):
+                        results_list = result
+                    else:
+                        results_list = [result]
+
+                    for r in results_list:
+                        fam = _metric_family(category, getattr(r, "metric", "") or category)
+
+                        findings_buffer.append(
                             {
-                                "category": CATEGORY_MAP.get(result.metric, category),
-                                "severity": result.severity,
-                                "metric_name": result.metric,
-                                "description": result.explanation,
+                                "category": CATEGORY_MAP.get(fam, fam),
+                                "severity": str(getattr(r, "severity", "LOW") or "LOW").upper(),
+                                "metric_name": str(getattr(r, "metric", fam)),
+                                "description": str(getattr(r, "explanation", "") or ""),
+                                "prompt_id": prompt_id,
                             }
                         )
 
-        # -----------------------------
+        # ---------------------------------------------------------
         # Audit result classification
-        # -----------------------------
-        critical = sum(1 for f in findings if f["severity"] == "CRITICAL")
-        high = sum(1 for f in findings if f["severity"] == "HIGH")
+        # ---------------------------------------------------------
+        critical = sum(1 for f in findings_buffer if f.get("severity") == "CRITICAL")
+        high = sum(1 for f in findings_buffer if f.get("severity") == "HIGH")
 
         audit_result = (
             "AUDIT_FAIL"
@@ -132,11 +264,11 @@ class AuditEngine:
 
         avg_latency_seconds: Optional[float] = None
         if prompts_executed > 0:
-            avg_latency_seconds = round(total_latency / prompts_executed, 3)
+            avg_latency_seconds = round(total_latency_seconds / prompts_executed, 3)
 
-        # -----------------------------
-        # Persist audit run
-        # -----------------------------
+        # ---------------------------------------------------------
+        # Persist AuditRun
+        # ---------------------------------------------------------
         audit = AuditRun(
             audit_id=audit_public_id,
             model_id=model.id,
@@ -149,58 +281,144 @@ class AuditEngine:
         self.db.add(audit)
         self.db.flush()
 
-        # -----------------------------
-        # Persist interactions
-        # -----------------------------
-        for i in interactions:
+        # ---------------------------------------------------------
+        # Persist interactions FIRST so we get IDs
+        # ---------------------------------------------------------
+        prompt_to_interaction_id: Dict[str, int] = {}
+
+        for i in interactions_buffer:
+            row = AuditInteraction(
+                audit_id=audit.id,
+                prompt_id=i["prompt_id"],
+                prompt=i["prompt"],
+                response=i["response"],
+                latency=i["latency_ms"],
+            )
+            self.db.add(row)
+            self.db.flush()  # force row.id population
+
+            prompt_to_interaction_id[i["prompt_id"]] = int(row.id)
+
+        # ---------------------------------------------------------
+        # Persist findings WITH evidence mapping ✅✅✅
+        # ---------------------------------------------------------
+        for f in findings_buffer:
+            pid = str(f.get("prompt_id") or "")
+            linked_interaction_id = prompt_to_interaction_id.get(pid)
+
             self.db.add(
-                AuditInteraction(
+                AuditFinding(
+                    finding_id=f"finding_{uuid.uuid4().hex[:8]}",
                     audit_id=audit.id,
-                    prompt_id=i["prompt_id"],
-                    prompt=i["prompt"],
-                    response=i["response"],
-                    latency=i["latency"],
+                    prompt_id=pid if pid else None,
+                    interaction_id=linked_interaction_id,
+                    category=str(f.get("category") or "compliance"),
+                    severity=str(f.get("severity") or "LOW"),
+                    metric_name=str(f.get("metric_name") or "unknown"),
+                    description=str(f.get("description") or ""),
                 )
             )
 
-        # ✅ This print is correct now
-        print("🔥 INSERTING INTERACTIONS:", len(interactions))
+        self.db.flush()
+
+        # ---------------------------------------------------------
+        # Compute enterprise scoring per metric family
+        # ---------------------------------------------------------
+        likelihood_map = _compute_likelihood(
+            findings=findings_buffer,
+            interactions_count=len(interactions_buffer),
+        )
+
+        metric_scores: List[MetricScore] = []
+
+        for metric_name in METRIC_FAMILIES:
+            L = float(likelihood_map.get(metric_name, {}).get("L", 0.0))
+            I = float(IMPACT_BASELINES.get(metric_name, 0.5))
+
+            R, breakdown = compute_regulatory_weight(metric_name)
+            R = float(R)
+
+            S, score_100 = score_metric_severity(L=L, I=I, R=R)
+            band = severity_band_from_score_100(score_100)
+
+            ms = MetricScore(
+                metric=metric_name,  # type: ignore
+                L=clamp01(L),
+                I=clamp01(I),
+                R=clamp01(R),
+                alpha=1.0,
+                beta=1.5,
+                w=1.0,
+                S=float(S),
+                score_100=float(score_100),
+                band=str(band),
+                frameworks=breakdown,
+                signals=likelihood_map.get(metric_name, {}).get("signals", {}),
+            )
+            metric_scores.append(ms)
+
+            self.db.add(
+                AuditMetricScore(
+                    audit_id=audit.id,
+                    metric_name=metric_name,
+                    likelihood=float(ms.L),
+                    impact=float(ms.I),
+                    regulatory_weight=float(ms.R),
+                    alpha=float(ms.alpha),
+                    beta=float(ms.beta),
+                    severity_score=float(ms.S),
+                    severity_score_100=float(ms.score_100),
+                    severity_band=str(ms.band),
+                    strategic_weight=float(ms.w),
+                    framework_breakdown=ms.frameworks or {},
+                    signals=ms.signals or {},
+                )
+            )
 
         self.db.flush()
 
-        # -----------------------------
-        # Persist summary
-        # -----------------------------
+        # ---------------------------------------------------------
+        # Global posture score
+        # ---------------------------------------------------------
+        _, global_score_100, global_band = score_global_severity(metric_scores)
+
+        # ---------------------------------------------------------
+        # Persist AuditSummary
+        # ---------------------------------------------------------
         self.db.add(
             AuditSummary(
                 audit_id=audit.id,
                 drift_score=None,
                 bias_score=None,
-                risk_score=min((critical * 30 + high * 15), 100),
-                total_findings=len(findings),
+                risk_score=float(global_score_100),
+                total_findings=len(findings_buffer),
                 critical_findings=critical,
                 high_findings=high,
                 metrics_snapshot={
                     "prompts_executed": prompts_executed,
                     "avg_latency_seconds": avg_latency_seconds,
+                    "dynamic_scoring": {
+                        "global_score_100": global_score_100,
+                        "global_band": global_band,
+                        "per_metric": [
+                            {
+                                "metric": ms.metric,
+                                "L": ms.L,
+                                "I": ms.I,
+                                "R": ms.R,
+                                "S": ms.S,
+                                "score_100": ms.score_100,
+                                "band": ms.band,
+                                "w": ms.w,
+                                "frameworks": ms.frameworks or {},
+                                "signals": ms.signals or {},
+                            }
+                            for ms in metric_scores
+                        ],
+                    },
                 },
             )
         )
-
-        # -----------------------------
-        # Persist findings
-        # -----------------------------
-        for f in findings:
-            self.db.add(
-                AuditFinding(
-                    finding_id=f"finding_{uuid.uuid4().hex[:8]}",
-                    audit_id=audit.id,
-                    category=f["category"],
-                    severity=f["severity"],
-                    metric_name=f["metric_name"],
-                    description=f["description"],
-                )
-            )
 
         self.db.commit()
         return audit

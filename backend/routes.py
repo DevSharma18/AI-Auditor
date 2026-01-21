@@ -1,3 +1,5 @@
+# backend/routes.py
+
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -13,6 +15,8 @@ from .models import (
     AuditPolicy,
     EvidenceSource,
     AuditInteraction,
+    AuditMetricScore,
+    AuditSummary,
 )
 from .schemas import ModelResponse, AuditResponse, RegisterModelRequest
 from .audit_engine import AuditEngine
@@ -21,19 +25,15 @@ from .report_builder import build_structured_report
 from .remediation_playbook import explain_category, remediation_steps
 from .report_pdf_reportlab import generate_audit_pdf_bytes
 
-router = APIRouter()
+router = APIRouter(tags=["Core"])
 
 
-# =========================================================
-# REGISTER MODEL (PROVIDER-AGNOSTIC)
-# =========================================================
 @router.post("/models/register-with-connector")
 def register_model(payload: RegisterModelRequest, db: Session = Depends(get_db)):
-
     if "{{PROMPT}}" not in str(payload.request_template):
         raise HTTPException(
             status_code=400,
-            detail="request_template must contain {{PROMPT}} placeholder"
+            detail="request_template must contain {{PROMPT}} placeholder",
         )
 
     existing = db.query(AIModel).filter(AIModel.model_id == payload.model_id).first()
@@ -68,9 +68,6 @@ def register_model(payload: RegisterModelRequest, db: Session = Depends(get_db))
     return {"status": "registered"}
 
 
-# =========================================================
-# LIST MODELS (ALWAYS RETURNS ARRAY)
-# =========================================================
 @router.get("/models", response_model=List[ModelResponse])
 def list_models(db: Session = Depends(get_db)):
     models = db.query(AIModel).all()
@@ -102,9 +99,6 @@ def list_models(db: Session = Depends(get_db)):
     return response
 
 
-# =========================================================
-# RUN AUDIT (ACTIVE)
-# =========================================================
 @router.post("/audits/model/{model_id}/run", response_model=AuditResponse)
 def run_model_audit(model_id: str, db: Session = Depends(get_db)):
     model = db.query(AIModel).filter(AIModel.model_id == model_id).first()
@@ -117,9 +111,7 @@ def run_model_audit(model_id: str, db: Session = Depends(get_db)):
     audit = engine.run_active_audit(model, policy)
 
     findings_count = (
-        db.query(AuditFinding)
-        .filter(AuditFinding.audit_id == audit.id)
-        .count()
+        db.query(AuditFinding).filter(AuditFinding.audit_id == audit.id).count()
     )
 
     return AuditResponse(
@@ -134,9 +126,6 @@ def run_model_audit(model_id: str, db: Session = Depends(get_db)):
     )
 
 
-# =========================================================
-# RECENT AUDITS FOR A MODEL
-# =========================================================
 @router.get("/audits/model/{model_id}/recent")
 def recent_model_audits(model_id: str, db: Session = Depends(get_db)):
     model = db.query(AIModel).filter(AIModel.model_id == model_id).first()
@@ -161,9 +150,6 @@ def recent_model_audits(model_id: str, db: Session = Depends(get_db)):
     ]
 
 
-# =========================================================
-# GET INTERACTIONS FOR AN AUDIT
-# =========================================================
 @router.get("/audits/{audit_id}/interactions")
 def get_audit_interactions(audit_id: str, db: Session = Depends(get_db)):
     audit = db.query(AuditRun).filter(AuditRun.audit_id == audit_id).first()
@@ -179,19 +165,17 @@ def get_audit_interactions(audit_id: str, db: Session = Depends(get_db)):
 
     return [
         {
+            "interaction_id": r.id,
             "prompt_id": r.prompt_id,
             "prompt": r.prompt,
             "response": r.response,
-            "latency": r.latency,
+            "latency_ms": float(r.latency or 0.0),
             "created_at": r.created_at.isoformat() if r.created_at else None,
         }
         for r in rows
     ]
 
 
-# =========================================================
-# FINDINGS + EXPLANATION + REMEDIATION
-# =========================================================
 @router.get("/audits/{audit_id}/findings")
 def get_audit_findings_with_guidance(audit_id: str, db: Session = Depends(get_db)):
     audit = db.query(AuditRun).filter(AuditRun.audit_id == audit_id).first()
@@ -214,6 +198,8 @@ def get_audit_findings_with_guidance(audit_id: str, db: Session = Depends(get_db
                 "severity": f.severity,
                 "metric_name": f.metric_name,
                 "description": f.description,
+                "prompt_id": getattr(f, "prompt_id", None),
+                "interaction_id": getattr(f, "interaction_id", None),
                 "explain": explain_category(f.category),
                 "remediation": remediation_steps(f.category, f.severity, f.metric_name),
             }
@@ -222,152 +208,135 @@ def get_audit_findings_with_guidance(audit_id: str, db: Session = Depends(get_db
     return results
 
 
-# =========================================================
-# DOWNLOAD STRUCTURED JSON REPORT
-# =========================================================
+@router.get("/audits/{audit_id}/findings-grouped")
+def get_audit_grouped_findings(audit_id: str, db: Session = Depends(get_db)):
+    audit = db.query(AuditRun).filter(AuditRun.audit_id == audit_id).first()
+    if not audit:
+        raise HTTPException(status_code=404, detail="Audit not found")
+
+    model = db.query(AIModel).filter(AIModel.id == audit.model_id).first()
+
+    findings = (
+        db.query(AuditFinding)
+        .filter(AuditFinding.audit_id == audit.id)
+        .order_by(AuditFinding.id.asc())
+        .all()
+    )
+
+    interactions = (
+        db.query(AuditInteraction)
+        .filter(AuditInteraction.audit_id == audit.id)
+        .order_by(AuditInteraction.created_at.asc())
+        .all()
+    )
+
+    metric_rows = (
+        db.query(AuditMetricScore)
+        .filter(AuditMetricScore.audit_id == audit.id)
+        .order_by(AuditMetricScore.severity_score_100.desc())
+        .all()
+    )
+
+    metric_scores_payload: List[Dict[str, Any]] = []
+    for ms in metric_rows:
+        metric_scores_payload.append(
+            {
+                "metric": ms.metric_name,
+                "L": float(ms.likelihood or 0.0),
+                "I": float(ms.impact or 0.0),
+                "R": float(ms.regulatory_weight or 0.0),
+                "S": float(ms.severity_score or 0.0),
+                "score_100": float(ms.severity_score_100 or 0.0),
+                "band": ms.severity_band or "LOW",
+                "w": float(ms.strategic_weight or 1.0),
+                "frameworks": ms.framework_breakdown or {},
+                "signals": ms.signals or {},
+                "alpha": float(ms.alpha or 1.0),
+                "beta": float(ms.beta or 1.5),
+            }
+        )
+
+    summary_row = (
+        db.query(AuditSummary)
+        .filter(AuditSummary.audit_id == audit.id)
+        .first()
+    )
+
+    global_risk = {}
+    if summary_row and summary_row.metrics_snapshot:
+        dyn = (summary_row.metrics_snapshot or {}).get("dynamic_scoring") or {}
+        global_risk = {
+            "score_100": dyn.get("global_score_100"),
+            "band": dyn.get("global_band"),
+        }
+
+    audit_payload: Dict[str, Any] = {
+        "audit_id": audit.audit_id,
+        "model_frontend_id": model.model_id if model else None,
+        "model_name": model.name if model else None,
+        "audit_type": audit.audit_type,
+        "executed_at": audit.executed_at.isoformat() if audit.executed_at else None,
+        "execution_status": audit.execution_status,
+        "audit_result": audit.audit_result,
+    }
+
+    findings_payload: List[Dict[str, Any]] = []
+    for f in findings:
+        findings_payload.append(
+            {
+                "finding_id": f.finding_id,
+                "category": f.category,
+                "severity": f.severity,
+                "metric_name": f.metric_name,
+                "description": f.description,
+                "prompt_id": getattr(f, "prompt_id", None),
+                "interaction_id": getattr(f, "interaction_id", None),
+                "explain": explain_category(f.category),
+                "remediation": remediation_steps(f.category, f.severity, f.metric_name),
+            }
+        )
+
+    interactions_payload: List[Dict[str, Any]] = [
+        {
+            "interaction_id": i.id,
+            "prompt_id": i.prompt_id,
+            "prompt": i.prompt,
+            "response": i.response,
+            "latency_ms": float(i.latency or 0.0),
+            "created_at": i.created_at.isoformat() if i.created_at else None,
+        }
+        for i in interactions
+    ]
+
+    structured_report = build_structured_report(
+        audit=audit_payload,
+        findings=findings_payload,
+        interactions=interactions_payload,
+        metric_scores=metric_scores_payload,
+        global_risk=global_risk,
+    )
+
+    return structured_report
+
+
 @router.get("/audits/{audit_id}/download")
 def download_audit_report_json(audit_id: str, db: Session = Depends(get_db)):
-    audit = db.query(AuditRun).filter(AuditRun.audit_id == audit_id).first()
-    if not audit:
-        raise HTTPException(status_code=404, detail="Audit not found")
-
-    model = db.query(AIModel).filter(AIModel.id == audit.model_id).first()
-
-    findings = (
-        db.query(AuditFinding)
-        .filter(AuditFinding.audit_id == audit.id)
-        .order_by(AuditFinding.id.asc())
-        .all()
-    )
-
-    interactions = (
-        db.query(AuditInteraction)
-        .filter(AuditInteraction.audit_id == audit.id)
-        .order_by(AuditInteraction.created_at.asc())
-        .all()
-    )
-
-    audit_payload: Dict[str, Any] = {
-        "audit_id": audit.audit_id,
-        "model_frontend_id": model.model_id if model else None,
-        "model_name": model.name if model else None,
-        "audit_type": audit.audit_type,
-        "executed_at": audit.executed_at.isoformat() if audit.executed_at else None,
-        "execution_status": audit.execution_status,
-        "audit_result": audit.audit_result,
-    }
-
-    findings_payload: List[Dict[str, Any]] = []
-    for f in findings:
-        findings_payload.append(
-            {
-                "finding_id": f.finding_id,
-                "category": f.category,
-                "severity": f.severity,
-                "metric_name": f.metric_name,
-                "description": f.description,
-                "explain": explain_category(f.category),
-                "remediation": remediation_steps(f.category, f.severity, f.metric_name),
-            }
-        )
-
-    interactions_payload: List[Dict[str, Any]] = [
-        {
-            "prompt_id": i.prompt_id,
-            "prompt": i.prompt,
-            "response": i.response,
-            "latency_ms": i.latency,
-            "created_at": i.created_at.isoformat() if i.created_at else None,
-        }
-        for i in interactions
-    ]
-
-    structured_report = build_structured_report(
-        audit=audit_payload,
-        findings=findings_payload,
-        interactions=interactions_payload,
-    )
+    report = get_audit_grouped_findings(audit_id=audit_id, db=db)
 
     return JSONResponse(
-        content=structured_report,
-        headers={
-            "Content-Disposition": f'attachment; filename="audit_{audit.audit_id}.json"'
-        },
+        content=report,
+        headers={"Content-Disposition": f'attachment; filename="audit_{audit_id}.json"'},
     )
 
 
-# =========================================================
-# DOWNLOAD PDF REPORT (REPORTLAB)
-# =========================================================
 @router.get("/audits/{audit_id}/download-pdf")
 def download_audit_report_pdf(audit_id: str, db: Session = Depends(get_db)):
-    audit = db.query(AuditRun).filter(AuditRun.audit_id == audit_id).first()
-    if not audit:
-        raise HTTPException(status_code=404, detail="Audit not found")
+    report = get_audit_grouped_findings(audit_id=audit_id, db=db)
 
-    model = db.query(AIModel).filter(AIModel.id == audit.model_id).first()
-
-    findings = (
-        db.query(AuditFinding)
-        .filter(AuditFinding.audit_id == audit.id)
-        .order_by(AuditFinding.id.asc())
-        .all()
-    )
-
-    interactions = (
-        db.query(AuditInteraction)
-        .filter(AuditInteraction.audit_id == audit.id)
-        .order_by(AuditInteraction.created_at.asc())
-        .all()
-    )
-
-    audit_payload: Dict[str, Any] = {
-        "audit_id": audit.audit_id,
-        "model_frontend_id": model.model_id if model else None,
-        "model_name": model.name if model else None,
-        "audit_type": audit.audit_type,
-        "executed_at": audit.executed_at.isoformat() if audit.executed_at else None,
-        "execution_status": audit.execution_status,
-        "audit_result": audit.audit_result,
-    }
-
-    findings_payload: List[Dict[str, Any]] = []
-    for f in findings:
-        findings_payload.append(
-            {
-                "finding_id": f.finding_id,
-                "category": f.category,
-                "severity": f.severity,
-                "metric_name": f.metric_name,
-                "description": f.description,
-                "explain": explain_category(f.category),
-                "remediation": remediation_steps(f.category, f.severity, f.metric_name),
-            }
-        )
-
-    interactions_payload: List[Dict[str, Any]] = [
-        {
-            "prompt_id": i.prompt_id,
-            "prompt": i.prompt,
-            "response": i.response,
-            "latency_ms": i.latency,
-            "created_at": i.created_at.isoformat() if i.created_at else None,
-        }
-        for i in interactions
-    ]
-
-    structured_report = build_structured_report(
-        audit=audit_payload,
-        findings=findings_payload,
-        interactions=interactions_payload,
-    )
-
-    pdf_bytes = generate_audit_pdf_bytes(structured_report)
+    pdf_bytes = generate_audit_pdf_bytes(report)
 
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
-        headers={
-            "Content-Disposition": f'attachment; filename="audit_{audit.audit_id}.pdf"'
-        },
+        headers={"Content-Disposition": f'attachment; filename="audit_{audit_id}.pdf"'},
     )
