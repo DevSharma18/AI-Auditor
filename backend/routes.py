@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import JSONResponse, Response
-from sqlalchemy.orm import Session
+from datetime import datetime
+import logging
+import uuid
 from typing import List, Dict, Any
 
-from .database import get_db
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi.responses import JSONResponse, Response
+from sqlalchemy.orm import Session
+
+from .database import get_db, SessionLocal
 from .models import (
     AIModel,
     AuditRun,
@@ -25,8 +29,14 @@ from .report_builder import build_structured_report
 from .remediation_playbook import explain_category, remediation_steps
 from .report_pdf_reportlab import generate_audit_pdf_bytes
 
+logger = logging.getLogger("ai-auditor")
+
 router = APIRouter(tags=["Core"])
 
+
+# =========================================================
+# Models
+# =========================================================
 
 @router.post("/models/register-with-connector")
 def register_model(payload: RegisterModelRequest, db: Session = Depends(get_db)):
@@ -45,6 +55,7 @@ def register_model(payload: RegisterModelRequest, db: Session = Depends(get_db))
         name=payload.name,
         model_type="llm",
         connection_type="api",
+        description=getattr(payload, "description", None),
     )
 
     db.add(model)
@@ -55,7 +66,7 @@ def register_model(payload: RegisterModelRequest, db: Session = Depends(get_db))
         source_type="api",
         config={
             "endpoint": payload.endpoint,
-            "method": payload.method,
+            "method": getattr(payload, "method", "POST"),
             "headers": payload.headers,
             "request_template": payload.request_template,
             "response_path": payload.response_path,
@@ -65,7 +76,7 @@ def register_model(payload: RegisterModelRequest, db: Session = Depends(get_db))
     db.add(evidence)
     db.commit()
 
-    return {"status": "registered"}
+    return {"status": "OK", "message": "registered"}
 
 
 @router.get("/models", response_model=List[ModelResponse])
@@ -81,6 +92,19 @@ def list_models(db: Session = Depends(get_db)):
             .first()
         )
 
+        # ✅ Enterprise: display RUNNING if execution_status is RUNNING
+        last_status = None
+        last_time = None
+        if last_audit:
+            last_time = last_audit.executed_at
+            if last_audit.execution_status == "RUNNING":
+                last_status = "RUNNING"
+            elif last_audit.execution_status == "FAILED":
+                last_status = "FAILED"
+            else:
+                # SUCCESS (completed): show PASS/WARN/FAIL
+                last_status = last_audit.audit_result
+
         response.append(
             ModelResponse(
                 id=model.id,
@@ -90,8 +114,8 @@ def list_models(db: Session = Depends(get_db)):
                 model_type=model.model_type,
                 connection_type=model.connection_type,
                 created_at=model.created_at,
-                last_audit_status=last_audit.audit_result if last_audit else None,
-                last_audit_time=last_audit.executed_at if last_audit else None,
+                last_audit_status=last_status,
+                last_audit_time=last_time,
                 audit_frequency="manual",
             )
         )
@@ -99,20 +123,102 @@ def list_models(db: Session = Depends(get_db)):
     return response
 
 
+# =========================================================
+# Background runner (enterprise-safe)
+# =========================================================
+
+def _run_audit_background(model_id: str, audit_public_id: str):
+    """
+    ✅ Background-safe audit runner
+    - creates its own DB session
+    - updates the SAME audit_id row
+    """
+    db: Session = SessionLocal()
+    try:
+        logger.info(f"Background audit START model_id={model_id} audit_id={audit_public_id}")
+
+        model = db.query(AIModel).filter(AIModel.model_id == model_id).first()
+        if not model:
+            logger.warning(f"Background audit: model not found model_id={model_id}")
+            return
+
+        audit_row = db.query(AuditRun).filter(AuditRun.audit_id == audit_public_id).first()
+        if not audit_row:
+            logger.warning(f"Background audit: audit row not found audit_id={audit_public_id}")
+            return
+
+        policy = db.query(AuditPolicy).filter(AuditPolicy.model_id == model.id).first()
+
+        engine = AuditEngine(db)
+
+        # ✅ IMPORTANT FIX:
+        # do NOT pass unsupported keyword args
+        # pass audit id as positional third param (most stable)
+        engine.run_active_audit(model, policy, audit_public_id)
+
+        logger.info(f"Background audit END model_id={model_id} audit_id={audit_public_id}")
+
+    except Exception as exc:
+        logger.exception(f"Background audit failed model_id={model_id} audit_id={audit_public_id}: {exc}")
+
+        try:
+            audit_row = db.query(AuditRun).filter(AuditRun.audit_id == audit_public_id).first()
+            if audit_row:
+                audit_row.execution_status = "FAILED"
+                audit_row.audit_result = "AUDIT_FAIL"
+                db.commit()
+        except Exception:
+            db.rollback()
+
+    finally:
+        db.close()
+
+
+# =========================================================
+# Audits
+# =========================================================
+
 @router.post("/audits/model/{model_id}/run", response_model=AuditResponse)
-def run_model_audit(model_id: str, db: Session = Depends(get_db)):
+def run_model_audit(
+    model_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """
+    ✅ Enterprise behavior:
+    - Create AuditRun immediately (RUNNING)
+    - Return audit_id immediately
+    - Run async in background
+    """
     model = db.query(AIModel).filter(AIModel.model_id == model_id).first()
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
 
-    policy = db.query(AuditPolicy).filter(AuditPolicy.model_id == model.id).first()
-
-    engine = AuditEngine(db)
-    audit = engine.run_active_audit(model, policy)
-
-    findings_count = (
-        db.query(AuditFinding).filter(AuditFinding.audit_id == audit.id).count()
+    evidence = (
+        db.query(EvidenceSource)
+        .filter(EvidenceSource.model_id == model.id, EvidenceSource.source_type == "api")
+        .first()
     )
+    if not evidence:
+        raise HTTPException(
+            status_code=400,
+            detail="NO_EVIDENCE: EvidenceSource not configured for this model",
+        )
+
+    audit_public_id = f"active_{uuid.uuid4().hex[:12]}"
+
+    audit = AuditRun(
+        audit_id=audit_public_id,
+        model_id=model.id,
+        audit_type="active",
+        executed_at=datetime.utcnow(),
+        execution_status="RUNNING",
+        audit_result="RUNNING",
+    )
+    db.add(audit)
+    db.commit()
+
+    background_tasks.add_task(_run_audit_background, model_id, audit_public_id)
 
     return AuditResponse(
         id=audit.id,
@@ -122,7 +228,7 @@ def run_model_audit(model_id: str, db: Session = Depends(get_db)):
         executed_at=audit.executed_at,
         execution_status=audit.execution_status,
         audit_result=audit.audit_result,
-        findings_count=findings_count,
+        findings_count=0,
     )
 
 
@@ -140,14 +246,24 @@ def recent_model_audits(model_id: str, db: Session = Depends(get_db)):
         .all()
     )
 
-    return [
-        {
-            "audit_id": a.audit_id,
-            "executed_at": a.executed_at.isoformat() if a.executed_at else None,
-            "audit_result": a.audit_result,
-        }
-        for a in audits
-    ]
+    # ✅ Enterprise: show RUNNING until completed
+    out = []
+    for a in audits:
+        result = a.audit_result
+        if a.execution_status == "RUNNING":
+            result = "RUNNING"
+        elif a.execution_status == "FAILED":
+            result = "FAILED"
+
+        out.append(
+            {
+                "audit_id": a.audit_id,
+                "executed_at": a.executed_at.isoformat() if a.executed_at else None,
+                "audit_result": result,
+            }
+        )
+
+    return out
 
 
 @router.get("/audits/{audit_id}/interactions")
@@ -256,11 +372,7 @@ def get_audit_grouped_findings(audit_id: str, db: Session = Depends(get_db)):
             }
         )
 
-    summary_row = (
-        db.query(AuditSummary)
-        .filter(AuditSummary.audit_id == audit.id)
-        .first()
-    )
+    summary_row = db.query(AuditSummary).filter(AuditSummary.audit_id == audit.id).first()
 
     global_risk = {}
     if summary_row and summary_row.metrics_snapshot:
@@ -322,7 +434,6 @@ def get_audit_grouped_findings(audit_id: str, db: Session = Depends(get_db)):
 @router.get("/audits/{audit_id}/download")
 def download_audit_report_json(audit_id: str, db: Session = Depends(get_db)):
     report = get_audit_grouped_findings(audit_id=audit_id, db=db)
-
     return JSONResponse(
         content=report,
         headers={"Content-Disposition": f'attachment; filename="audit_{audit_id}.json"'},
@@ -332,9 +443,7 @@ def download_audit_report_json(audit_id: str, db: Session = Depends(get_db)):
 @router.get("/audits/{audit_id}/download-pdf")
 def download_audit_report_pdf(audit_id: str, db: Session = Depends(get_db)):
     report = get_audit_grouped_findings(audit_id=audit_id, db=db)
-
     pdf_bytes = generate_audit_pdf_bytes(report)
-
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",

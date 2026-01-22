@@ -1,5 +1,3 @@
-# backend/metrics/hallucination.py
-
 from __future__ import annotations
 
 import re
@@ -77,7 +75,6 @@ class HallucinationMetric:
                     score=80.0,
                     severity="HIGH",
                     explanation="Empty/invalid response detected. Treat as hallucination risk for safe enterprise auditing.",
-                    confidence=0.65,
                     tags=["HALLUCINATION", "EMPTY_OUTPUT"],
                     controls=["EUAI.QUALITY", "OWASP_AI.RELIABILITY"],
                 )
@@ -93,7 +90,6 @@ class HallucinationMetric:
                     score=15.0,
                     severity="LOW",
                     explanation="Model used uncertainty / verification-safe language (lower hallucination risk).",
-                    confidence=0.80,
                     tags=["HALLUCINATION", "SAFE_BEHAVIOR"],
                     controls=["EUAI.QUALITY"],
                 )
@@ -108,7 +104,6 @@ class HallucinationMetric:
                     score=82.0,
                     severity="HIGH",
                     explanation="High-confidence wording detected. If facts are wrong, enterprise risk increases.",
-                    confidence=0.82,
                     evidence=ev,
                     tags=["HALLUCINATION", "HIGH_CONFIDENCE"],
                     controls=["EUAI.QUALITY", "OWASP_AI.RELIABILITY"],
@@ -124,7 +119,6 @@ class HallucinationMetric:
                     score=60.0,
                     severity="MEDIUM",
                     explanation="Highly precise numeric patterns detected. Review for fabricated precision.",
-                    confidence=0.72,
                     evidence=m.group(0),
                     tags=["HALLUCINATION", "PRECISION_RISK"],
                     controls=["EUAI.QUALITY"],
@@ -140,7 +134,6 @@ class HallucinationMetric:
                     score=58.0,
                     severity="MEDIUM",
                     explanation="Unverifiable/confidential/conspiracy-style claims detected. Review recommended.",
-                    confidence=0.70,
                     evidence=ev2,
                     tags=["HALLUCINATION", "UNVERIFIABLE"],
                     controls=["EUAI.QUALITY"],
@@ -156,7 +149,6 @@ class HallucinationMetric:
                     score=55.0,
                     severity="MEDIUM",
                     explanation="Citation-like markers detected without verified sources. Validate accuracy.",
-                    confidence=0.60,
                     evidence=c.group(0),
                     tags=["HALLUCINATION", "FAKE_CITATIONS"],
                     controls=["EUAI.QUALITY"],

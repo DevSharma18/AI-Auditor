@@ -38,6 +38,10 @@ from .scoring.severity_engine import (
     severity_band_from_score_100,
 )
 
+import logging
+
+logger = logging.getLogger("ai-auditor")
+
 CATEGORY_MAP = {
     "bias": "bias",
     "bias_score": "bias",
@@ -58,23 +62,16 @@ def _norm(name: str) -> str:
 
 
 def _metric_family(category: str, metric_name: str) -> str:
-    """
-    Normalize everything into stable metric families:
-    bias/pii/hallucination/compliance/drift
-    """
     c = _norm(category)
     m = _norm(metric_name)
 
-    # Prefer metric_name if it already matches
     if m in METRIC_FAMILIES:
         return m
 
-    # If metric_name has prefixes like pii_email_detected etc.
     for fam in METRIC_FAMILIES:
         if m.startswith(fam + "_"):
             return fam
 
-    # Else rely on category
     if c in METRIC_FAMILIES:
         return c
 
@@ -85,11 +82,6 @@ def _compute_likelihood(
     findings: List[Dict[str, Any]],
     interactions_count: int,
 ) -> Dict[str, Dict[str, Any]]:
-    """
-    Enterprise L calculation:
-    frequency = findings_of_metric_family / interactions
-    L = normalize_likelihood(frequency)
-    """
     per_metric_count: Dict[str, int] = {}
 
     for f in findings:
@@ -114,7 +106,6 @@ def _compute_likelihood(
             },
         }
 
-    # Ensure all metric families exist even if 0
     for fam in METRIC_FAMILIES:
         if fam not in out:
             out[fam] = {
@@ -130,15 +121,6 @@ def _compute_likelihood(
 
 
 class AuditEngine:
-    """
-    ✅ Enterprise Active Audit Engine
-
-    - Executes prompt suite from PROMPT_CATEGORIES
-    - Evaluates metrics (bias/pii/hallucination/compliance/drift)
-    - Stores AuditInteraction + AuditFinding (with evidence mapping)
-    - Computes per-metric and global enterprise severity scoring
-    """
-
     def __init__(self, db: Session):
         self.db = db
 
@@ -150,11 +132,27 @@ class AuditEngine:
             "drift": DriftMetric(),
         }
 
-    def run_active_audit(self, model: AIModel, policy=None) -> AuditRun:
-        audit_public_id = f"active_{uuid.uuid4().hex[:12]}"
+    def run_active_audit(
+        self,
+        model: AIModel,
+        policy=None,
+        audit_public_id: Optional[str] = None,
+    ) -> AuditRun:
+        """
+        ✅ Enterprise Active Audit Engine
+
+        FIXED BEHAVIOR:
+        - If audit_public_id provided:
+            - reuse the SAME AuditRun row created by routes.py
+            - attach interactions/findings/metrics/summary to it
+        - If audit_public_id not provided:
+            - create a new AuditRun row (fallback)
+
+        Always commits results into DB.
+        """
 
         # ---------------------------------------------------------
-        # Evidence source validation (required)
+        # EvidenceSource
         # ---------------------------------------------------------
         evidence = (
             self.db.query(EvidenceSource)
@@ -169,15 +167,53 @@ class AuditEngine:
 
         executor = ModelExecutor(evidence.config)
 
+        # ---------------------------------------------------------
+        # Load or create audit row
+        # ---------------------------------------------------------
+        audit: Optional[AuditRun] = None
+
+        if audit_public_id:
+            audit = self.db.query(AuditRun).filter(AuditRun.audit_id == audit_public_id).first()
+            if not audit:
+                raise RuntimeError(f"AuditRun not found for audit_id={audit_public_id}")
+
+            # make sure it is marked running at start
+            audit.execution_status = "RUNNING"
+            audit.audit_result = "RUNNING"
+            audit.executed_at = audit.executed_at or datetime.utcnow()
+            self.db.commit()
+
+        else:
+            audit_public_id = f"active_{uuid.uuid4().hex[:12]}"
+            audit = AuditRun(
+                audit_id=audit_public_id,
+                model_id=model.id,
+                audit_type="active",
+                executed_at=datetime.utcnow(),
+                execution_status="RUNNING",
+                audit_result="RUNNING",
+            )
+            self.db.add(audit)
+            self.db.commit()
+            self.db.refresh(audit)
+
+        # ---------------------------------------------------------
+        # Run prompts
+        # ---------------------------------------------------------
         interactions_buffer: List[Dict[str, Any]] = []
         findings_buffer: List[Dict[str, Any]] = []
 
         prompts_executed = 0
         total_latency_seconds = 0.0
 
-        # ---------------------------------------------------------
-        # Run prompt suite
-        # ---------------------------------------------------------
+        total_prompts = sum(
+            len(v) for v in PROMPT_CATEGORIES.values() if isinstance(v, list)
+        )
+
+        logger.info(f"Active audit START model={model.model_id} prompts={total_prompts} audit_id={audit.audit_id}")
+
+        executed_counter = 0
+
         for category, prompts in PROMPT_CATEGORIES.items():
             metric = self.metric_registry.get(category)
 
@@ -185,20 +221,25 @@ class AuditEngine:
                 continue
 
             for p in prompts:
+                executed_counter += 1
+
+                if executed_counter % 25 == 0:
+                    logger.info(
+                        f"Active audit progress model={model.model_id} audit_id={audit.audit_id} executed={executed_counter}/{total_prompts}"
+                    )
+
                 prompt_id = str(p.get("id") or f"{category}_{uuid.uuid4().hex[:6]}")
                 prompt_text = str(p.get("prompt") or "")
 
                 if not prompt_text.strip():
                     continue
 
-                # Execute prompt
                 try:
                     execution = executor.execute_active_prompt(prompt_text)
-
-                    response_text = execution.get("raw_response", "")
+                    response_text = execution.get("content", "")
                     latency_seconds = float(execution.get("latency", 0.0))
+
                 except Exception as exc:
-                    # Execution failures count under compliance
                     findings_buffer.append(
                         {
                             "category": "compliance",
@@ -208,12 +249,14 @@ class AuditEngine:
                             "prompt_id": prompt_id,
                         }
                     )
+                    logger.warning(
+                        f"Prompt execution failed model={model.model_id} prompt_id={prompt_id} category={category} err={exc}"
+                    )
                     continue
 
                 prompts_executed += 1
                 total_latency_seconds += latency_seconds
 
-                # Store interaction in memory (persist later)
                 interactions_buffer.append(
                     {
                         "prompt_id": prompt_id,
@@ -223,7 +266,6 @@ class AuditEngine:
                     }
                 )
 
-                # Evaluate metric signals
                 if metric:
                     result = metric.evaluate(prompt=prompt_text, response=str(response_text or ""))
 
@@ -248,8 +290,12 @@ class AuditEngine:
                             }
                         )
 
+        logger.info(
+            f"Active audit END model={model.model_id} audit_id={audit.audit_id} prompts_ok={prompts_executed}/{total_prompts} interactions={len(interactions_buffer)} findings={len(findings_buffer)}"
+        )
+
         # ---------------------------------------------------------
-        # Audit result classification
+        # Determine result
         # ---------------------------------------------------------
         critical = sum(1 for f in findings_buffer if f.get("severity") == "CRITICAL")
         high = sum(1 for f in findings_buffer if f.get("severity") == "HIGH")
@@ -267,22 +313,7 @@ class AuditEngine:
             avg_latency_seconds = round(total_latency_seconds / prompts_executed, 3)
 
         # ---------------------------------------------------------
-        # Persist AuditRun
-        # ---------------------------------------------------------
-        audit = AuditRun(
-            audit_id=audit_public_id,
-            model_id=model.id,
-            audit_type="active",
-            executed_at=datetime.utcnow(),
-            execution_status="SUCCESS",
-            audit_result=audit_result,
-        )
-
-        self.db.add(audit)
-        self.db.flush()
-
-        # ---------------------------------------------------------
-        # Persist interactions FIRST so we get IDs
+        # Persist interactions & findings
         # ---------------------------------------------------------
         prompt_to_interaction_id: Dict[str, int] = {}
 
@@ -295,13 +326,9 @@ class AuditEngine:
                 latency=i["latency_ms"],
             )
             self.db.add(row)
-            self.db.flush()  # force row.id population
-
+            self.db.flush()
             prompt_to_interaction_id[i["prompt_id"]] = int(row.id)
 
-        # ---------------------------------------------------------
-        # Persist findings WITH evidence mapping ✅✅✅
-        # ---------------------------------------------------------
         for f in findings_buffer:
             pid = str(f.get("prompt_id") or "")
             linked_interaction_id = prompt_to_interaction_id.get(pid)
@@ -322,7 +349,7 @@ class AuditEngine:
         self.db.flush()
 
         # ---------------------------------------------------------
-        # Compute enterprise scoring per metric family
+        # Metric scoring
         # ---------------------------------------------------------
         likelihood_map = _compute_likelihood(
             findings=findings_buffer,
@@ -378,13 +405,10 @@ class AuditEngine:
         self.db.flush()
 
         # ---------------------------------------------------------
-        # Global posture score
+        # Global severity summary
         # ---------------------------------------------------------
         _, global_score_100, global_band = score_global_severity(metric_scores)
 
-        # ---------------------------------------------------------
-        # Persist AuditSummary
-        # ---------------------------------------------------------
         self.db.add(
             AuditSummary(
                 audit_id=audit.id,
@@ -420,5 +444,12 @@ class AuditEngine:
             )
         )
 
+        # ---------------------------------------------------------
+        # Final audit status in same row
+        # ---------------------------------------------------------
+        audit.execution_status = "SUCCESS"
+        audit.audit_result = audit_result
+
         self.db.commit()
+        self.db.refresh(audit)
         return audit

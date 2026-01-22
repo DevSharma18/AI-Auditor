@@ -2,7 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { apiGet, safeNumber } from '@/lib/api-client';
+import { apiGet, apiGetBlob } from '@/lib/api-client';
 
 type Model = {
     id: number;
@@ -98,24 +98,6 @@ type FindingsGroupedReport = {
 
 const SEVERITY_ORDER = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
 
-function bandColor(band: string) {
-    const b = (band || '').toUpperCase();
-    if (b === 'CRITICAL') return '#991b1b';
-    if (b === 'SEVERE') return '#9a3412';
-    if (b === 'HIGH') return '#9a3412';
-    if (b === 'MODERATE') return '#92400e';
-    return '#166534';
-}
-
-function safeDateTime(v: any) {
-    if (!v) return '-';
-    try {
-        return new Date(String(v)).toLocaleString();
-    } catch {
-        return '-';
-    }
-}
-
 export default function ExecutiveReportsPage() {
     const router = useRouter();
 
@@ -138,9 +120,8 @@ export default function ExecutiveReportsPage() {
             setLoadingModels(true);
             setError(null);
 
-            const data = await apiGet<any>('/models');
-            const list = Array.isArray(data) ? (data as Model[]) : [];
-            setModels(list);
+            const data = await apiGet<Model[]>('/models');
+            setModels(Array.isArray(data) ? data : []);
         } catch (e: any) {
             setModels([]);
             setError(e?.message || 'Failed to load models');
@@ -160,15 +141,12 @@ export default function ExecutiveReportsPage() {
             setLoadingAudits(true);
             setError(null);
 
-            const data = await apiGet<any>(`/audits/model/${modelId}/recent`);
-            const list = Array.isArray(data) ? (data as Audit[]) : [];
+            const data = await apiGet<any[]>(`/audits/model/${modelId}/recent`);
+            const list = Array.isArray(data) ? data : [];
             setAudits(list);
 
-            if (list.length > 0) {
-                setSelectedAuditId(list[0].audit_id);
-            } else {
-                setSelectedAuditId('');
-            }
+            if (list.length > 0) setSelectedAuditId(list[0].audit_id);
+            else setSelectedAuditId('');
         } catch (e: any) {
             setAudits([]);
             setSelectedAuditId('');
@@ -188,13 +166,41 @@ export default function ExecutiveReportsPage() {
             setLoadingReport(true);
             setError(null);
 
-            const data = await apiGet<FindingsGroupedReport>(`/audits/${auditId}/findings-grouped`);
+            const data = (await apiGet(`/audits/${auditId}/findings-grouped`)) as FindingsGroupedReport;
             setReport(data || null);
         } catch (e: any) {
             setReport(null);
             setError(e?.message || 'Failed to load executive report');
         } finally {
             setLoadingReport(false);
+        }
+    }
+
+    async function downloadJson(auditId: string) {
+        try {
+            const blob = await apiGetBlob(`/audits/${auditId}/download`);
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `audit_${auditId}.json`;
+            a.click();
+            window.URL.revokeObjectURL(url);
+        } catch (e: any) {
+            alert(e?.message || 'Failed to download JSON');
+        }
+    }
+
+    async function downloadPdf(auditId: string) {
+        try {
+            const blob = await apiGetBlob(`/audits/${auditId}/download-pdf`);
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `audit_${auditId}.pdf`;
+            a.click();
+            window.URL.revokeObjectURL(url);
+        } catch (e: any) {
+            alert(e?.message || 'Failed to download PDF');
         }
     }
 
@@ -223,9 +229,7 @@ export default function ExecutiveReportsPage() {
         return Array.isArray(list) ? list : [];
     }, [report]);
 
-    const globalRisk = useMemo(() => {
-        return report?.global_risk ?? {};
-    }, [report]);
+    const globalRisk = useMemo(() => report?.global_risk ?? {}, [report]);
 
     const groupedFindings = useMemo(() => {
         const list = report?.grouped_findings ?? [];
@@ -255,25 +259,21 @@ export default function ExecutiveReportsPage() {
 
     const topRiskMetric = useMemo(() => {
         if (!metricScores.length) return null;
-        const sorted = [...metricScores].sort((a, b) => safeNumber(b.score_100, 0) - safeNumber(a.score_100, 0));
-        return sorted[0] || null;
+        const sorted = [...metricScores].sort((a, b) => (b.score_100 ?? 0) - (a.score_100 ?? 0));
+        return sorted[0];
     }, [metricScores]);
-
-    const downloadDisabled = !selectedAuditId;
 
     return (
         <div style={{ minHeight: '100vh', background: '#ffffff', padding: 0 }}>
-            {/* Header */}
             <div style={{ marginBottom: 24 }}>
                 <h1 style={{ fontSize: 28, fontWeight: 900, color: '#111827', marginBottom: 8 }}>
                     Executive Reports
                 </h1>
                 <p style={{ fontSize: 14, color: '#6b7280', lineHeight: 1.5 }}>
-                    Enterprise-ready AI risk scoring using <b>L (Likelihood)</b>, <b>I (Impact)</b>, <b>R (Regulatory)</b> and evidence-driven audits.
+                    Enterprise-ready AI risk scoring using <b>L</b> (Likelihood), <b>I</b> (Impact), <b>R</b> (Regulatory).
                 </p>
             </div>
 
-            {/* Controls */}
             <div style={panel}>
                 <div style={panelTitle}>Report Controls</div>
 
@@ -309,13 +309,13 @@ export default function ExecutiveReportsPage() {
                                 {!selectedModel
                                     ? 'Select model first'
                                     : loadingAudits
-                                    ? 'Loading audits...'
-                                    : 'Choose an audit'}
+                                      ? 'Loading audits...'
+                                      : 'Choose an audit'}
                             </option>
 
                             {audits.map((a) => (
                                 <option key={a.audit_id} value={a.audit_id}>
-                                    {a.audit_id} — {safeDateTime(a.executed_at)}
+                                    {a.audit_id} — {a.executed_at ? new Date(a.executed_at).toLocaleString() : '—'}
                                 </option>
                             ))}
                         </select>
@@ -328,45 +328,38 @@ export default function ExecutiveReportsPage() {
                     </button>
 
                     <button
-                        style={!downloadDisabled ? btnOutline : btnDisabled}
-                        disabled={downloadDisabled}
-                        onClick={() => window.open(`/api/audits/${selectedAuditId}/download`, '_blank')}
+                        style={selectedAuditId ? btnOutline : btnDisabled}
+                        disabled={!selectedAuditId}
+                        onClick={() => downloadJson(selectedAuditId)}
                     >
                         Download JSON
                     </button>
 
                     <button
-                        style={!downloadDisabled ? btnPrimary : btnDisabledPrimary}
-                        disabled={downloadDisabled}
-                        onClick={() => window.open(`/api/audits/${selectedAuditId}/download-pdf`, '_blank')}
+                        style={selectedAuditId ? btnPrimary : btnDisabledPrimary}
+                        disabled={!selectedAuditId}
+                        onClick={() => downloadPdf(selectedAuditId)}
                     >
                         Download PDF
                     </button>
                 </div>
             </div>
 
-            {/* Error */}
             {error && <div style={boxError}>{error}</div>}
 
-            {/* Loading */}
             {loadingReport ? (
                 <div style={boxMuted}>Loading executive report...</div>
             ) : !report ? (
                 <div style={boxMuted}>Select a model and audit to view enterprise risk scoring.</div>
             ) : (
                 <>
-                    {/* Global Risk Summary */}
                     <div style={{ marginTop: 18 }}>
                         <div style={sectionHeader}>Global Risk Posture (Enterprise Score)</div>
 
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
                             <div style={metricCard}>
                                 <div style={metricLabel}>Global Risk Score</div>
-                                <div style={metricValue}>
-                                    {Number.isFinite(safeNumber(globalRisk?.score_100, NaN))
-                                        ? safeNumber(globalRisk?.score_100, 0).toFixed(2)
-                                        : '-'}
-                                </div>
+                                <div style={metricValue}>{globalRisk?.score_100 ?? '-'}</div>
                             </div>
 
                             <div style={metricCard}>
@@ -378,24 +371,23 @@ export default function ExecutiveReportsPage() {
 
                             <div style={metricCard}>
                                 <div style={metricLabel}>Unique Issues</div>
-                                <div style={metricValue}>{safeNumber(report.unique_issue_count, 0)}</div>
+                                <div style={metricValue}>{report.unique_issue_count}</div>
                             </div>
 
                             <div style={metricCard}>
                                 <div style={metricLabel}>Raw Findings</div>
-                                <div style={metricValue}>{safeNumber(report.summary?.total_findings_raw, 0)}</div>
+                                <div style={metricValue}>{report.summary?.total_findings_raw ?? 0}</div>
                             </div>
                         </div>
 
                         {topRiskMetric && (
                             <div style={{ marginTop: 12, ...boxMuted, borderColor: '#111827', color: '#111827' }}>
-                                <b>Top Risk Driver:</b> {String(topRiskMetric.metric || '').toUpperCase()} —{' '}
-                                <b>{safeNumber(topRiskMetric.score_100, 0).toFixed(2)}</b> / 100 ({topRiskMetric.band || 'UNKNOWN'})
+                                <b>Top Risk Driver:</b> {topRiskMetric.metric.toUpperCase()} —{' '}
+                                <b>{topRiskMetric.score_100}</b> / 100 ({topRiskMetric.band})
                             </div>
                         )}
                     </div>
 
-                    {/* Severity Breakdown */}
                     <div style={{ marginTop: 18 }}>
                         <div style={sectionHeader}>Findings Breakdown (Deduplicated)</div>
 
@@ -403,13 +395,12 @@ export default function ExecutiveReportsPage() {
                             {SEVERITY_ORDER.map((s) => (
                                 <div key={s} style={severityCard(s)}>
                                     <div style={metricLabel}>{s}</div>
-                                    <div style={metricValue}>{safeNumber(countsBySeverity[s], 0)}</div>
+                                    <div style={metricValue}>{countsBySeverity[s] || 0}</div>
                                 </div>
                             ))}
                         </div>
                     </div>
 
-                    {/* Category Breakdown */}
                     <div style={{ marginTop: 18 }}>
                         <div style={sectionHeader}>Risk Areas</div>
 
@@ -417,19 +408,18 @@ export default function ExecutiveReportsPage() {
                             {Object.entries(countsByCategory).map(([cat, count]) => (
                                 <div key={cat} style={metricCard}>
                                     <div style={metricLabel}>{cat}</div>
-                                    <div style={metricValue}>{safeNumber(count, 0)}</div>
+                                    <div style={metricValue}>{count}</div>
                                 </div>
                             ))}
                         </div>
                     </div>
 
-                    {/* Enterprise Metric Scoring */}
                     <div style={{ marginTop: 18 }}>
                         <div style={sectionHeader}>Enterprise Metric Scoring (L / I / R)</div>
 
                         {metricScores.length === 0 ? (
                             <div style={boxMuted}>
-                                No metric scores available. Run an audit again and ensure `audit_metric_scores` table is populated.
+                                No metric scores available. Run an audit again and ensure metric scoring is stored.
                             </div>
                         ) : (
                             <div style={{ display: 'grid', gap: 12 }}>
@@ -437,29 +427,29 @@ export default function ExecutiveReportsPage() {
                                     <div key={m.metric} style={scoreCard}>
                                         <div style={scoreTopRow}>
                                             <div style={{ minWidth: 0 }}>
-                                                <div style={scoreTitle}>{String(m.metric || '').toUpperCase()}</div>
+                                                <div style={scoreTitle}>{m.metric.toUpperCase()}</div>
                                                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                                                     <span style={chipNeutral}>
-                                                        Score: <b>{safeNumber(m.score_100, 0).toFixed(2)}</b> / 100
+                                                        Score: <b>{(m.score_100 ?? 0).toFixed(2)}</b> / 100
                                                     </span>
                                                     <span style={chipBand(m.band)}>{m.band}</span>
-                                                    <span style={chipNeutral}>α={safeNumber(m.alpha, 1)}</span>
-                                                    <span style={chipNeutral}>β={safeNumber(m.beta, 1.5)}</span>
+                                                    <span style={chipNeutral}>α={m.alpha ?? 1}</span>
+                                                    <span style={chipNeutral}>β={m.beta ?? 1.5}</span>
                                                 </div>
                                             </div>
 
                                             <div style={scoreRightBox}>
                                                 <div style={scoreRightItem}>
                                                     <div style={rightMetaLabel}>L</div>
-                                                    <div style={rightMetaValue}>{safeNumber(m.L, 0).toFixed(2)}</div>
+                                                    <div style={rightMetaValue}>{(m.L ?? 0).toFixed(2)}</div>
                                                 </div>
                                                 <div style={scoreRightItem}>
                                                     <div style={rightMetaLabel}>I</div>
-                                                    <div style={rightMetaValue}>{safeNumber(m.I, 0).toFixed(2)}</div>
+                                                    <div style={rightMetaValue}>{(m.I ?? 0).toFixed(2)}</div>
                                                 </div>
                                                 <div style={scoreRightItem}>
                                                     <div style={rightMetaLabel}>R</div>
-                                                    <div style={rightMetaValue}>{safeNumber(m.R, 0).toFixed(2)}</div>
+                                                    <div style={rightMetaValue}>{(m.R ?? 0).toFixed(2)}</div>
                                                 </div>
                                             </div>
                                         </div>
@@ -470,7 +460,7 @@ export default function ExecutiveReportsPage() {
                                             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                                                 {Object.entries(m.frameworks || {}).map(([k, v]) => (
                                                     <span key={k} style={chipNeutral}>
-                                                        {k}: <b>{safeNumber(v, 0).toFixed(2)}</b>
+                                                        {k}: <b>{Number(v).toFixed(2)}</b>
                                                     </span>
                                                 ))}
                                                 {Object.keys(m.frameworks || {}).length === 0 && (
@@ -481,9 +471,7 @@ export default function ExecutiveReportsPage() {
 
                                         <div style={{ marginTop: 12, ...boxSoft }}>
                                             <div style={blockTitle}>Signals (Evidence)</div>
-                                            <pre style={jsonBox}>
-                                                {JSON.stringify(m.signals || {}, null, 2)}
-                                            </pre>
+                                            <pre style={jsonBox}>{JSON.stringify(m.signals || {}, null, 2)}</pre>
                                         </div>
                                     </div>
                                 ))}
@@ -491,7 +479,6 @@ export default function ExecutiveReportsPage() {
                         )}
                     </div>
 
-                    {/* Detailed Issues */}
                     <div style={{ marginTop: 18 }}>
                         <div style={sectionHeader}>Grouped Findings (Deduplicated Issues)</div>
 
@@ -504,7 +491,7 @@ export default function ExecutiveReportsPage() {
                                         <div style={findingTopRow}>
                                             <div style={{ minWidth: 0 }}>
                                                 <div style={findingId}>
-                                                    {f.metric_name} — Occurrences: {safeNumber(f.occurrences, 0)}
+                                                    {f.metric_name} — Occurrences: {f.occurrences}
                                                 </div>
 
                                                 <div style={chipRow}>
@@ -519,14 +506,12 @@ export default function ExecutiveReportsPage() {
                                             <div style={rightMetaBox}>
                                                 <div style={rightMetaItem}>
                                                     <div style={rightMetaLabel}>Owner</div>
-                                                    {/* ✅ FIXED: this was broken text in your version */}
                                                     <div style={rightMetaValue}>
                                                         {f.remediation?.recommended_owner || 'Engineering'}
                                                     </div>
                                                 </div>
                                                 <div style={rightMetaItem}>
                                                     <div style={rightMetaLabel}>Priority</div>
-                                                    {/* ✅ FIXED: this was broken text in your version */}
                                                     <div style={rightMetaValue}>
                                                         {f.remediation?.priority || 'STANDARD'}
                                                     </div>
@@ -576,7 +561,6 @@ export default function ExecutiveReportsPage() {
                         )}
                     </div>
 
-                    {/* Evidence Samples */}
                     <div style={{ marginTop: 18 }}>
                         <div style={sectionHeader}>Evidence Samples (Limited)</div>
 
@@ -588,18 +572,18 @@ export default function ExecutiveReportsPage() {
                                     <div key={idx} style={evidenceCard}>
                                         <div style={{ fontSize: 12, color: '#6b7280', fontWeight: 800 }}>
                                             Prompt ID:{' '}
-                                            <span style={{ fontFamily: 'monospace' }}>{e.prompt_id || '-'}</span> · Latency:{' '}
-                                            <b>{safeNumber(e.latency_ms, 0)}</b> ms
+                                            <span style={{ fontFamily: 'monospace' }}>{e.prompt_id}</span> · Latency:{' '}
+                                            <b>{e.latency_ms}</b> ms
                                         </div>
 
                                         <div style={{ marginTop: 10 }}>
                                             <div style={blockTitle}>Prompt</div>
-                                            <pre style={codeBox}>{e.prompt || '-'}</pre>
+                                            <pre style={codeBox}>{e.prompt}</pre>
                                         </div>
 
                                         <div style={{ marginTop: 10 }}>
                                             <div style={blockTitle}>Response</div>
-                                            <pre style={codeBox}>{e.response || '-'}</pre>
+                                            <pre style={codeBox}>{e.response}</pre>
                                         </div>
                                     </div>
                                 ))}
@@ -781,6 +765,15 @@ const severityCard = (sev: string) => {
     } as const;
 };
 
+function bandColor(band: string) {
+    const b = (band || '').toUpperCase();
+    if (b === 'CRITICAL') return '#991b1b';
+    if (b === 'SEVERE') return '#9a3412';
+    if (b === 'HIGH') return '#9a3412';
+    if (b === 'MODERATE') return '#92400e';
+    return '#166534';
+}
+
 const chipNeutral = {
     display: 'inline-block',
     padding: '6px 10px',
@@ -836,6 +829,21 @@ const scoreRightItem = {
     padding: '10px 12px',
     minWidth: 90,
     background: '#ffffff',
+} as const;
+
+const rightMetaLabel = {
+    fontSize: 11,
+    fontWeight: 900,
+    color: '#6b7280',
+    textTransform: 'uppercase' as const,
+    letterSpacing: '0.5px',
+    marginBottom: 6,
+} as const;
+
+const rightMetaValue = {
+    fontSize: 13,
+    fontWeight: 900,
+    color: '#111827',
 } as const;
 
 const findingCard = {
@@ -913,21 +921,6 @@ const rightMetaItem = {
     padding: '10px 12px',
     minWidth: 140,
     background: '#ffffff',
-} as const;
-
-const rightMetaLabel = {
-    fontSize: 11,
-    fontWeight: 900,
-    color: '#6b7280',
-    textTransform: 'uppercase' as const,
-    letterSpacing: '0.5px',
-    marginBottom: 6,
-} as const;
-
-const rightMetaValue = {
-    fontSize: 13,
-    fontWeight: 900,
-    color: '#111827',
 } as const;
 
 const block = {

@@ -19,17 +19,24 @@ SEVERITY_ORDER = ["CRITICAL", "HIGH", "MEDIUM", "LOW"]
 # =========================================================
 
 def _fetch_metric_series(db: Session, metric_name: str, model_id: str | None):
+    """
+    ✅ FIXED (Enterprise-safe):
+    SQLAlchemy does NOT allow calling .filter() AFTER .limit() / .offset().
+    So all filters must be applied BEFORE .limit().
+    """
     q = (
         db.query(AuditMetricScore, AuditRun, AIModel)
         .join(AuditRun, AuditMetricScore.audit_id == AuditRun.id)
         .join(AIModel, AuditRun.model_id == AIModel.id)
         .filter(AuditMetricScore.metric_name == metric_name)
-        .order_by(AuditRun.executed_at.desc())
-        .limit(10)
     )
 
+    # ✅ apply model filter BEFORE limit
     if model_id:
         q = q.filter(AIModel.model_id == model_id)
+
+    # ✅ now ordering + limit is safe
+    q = q.order_by(AuditRun.executed_at.desc()).limit(10)
 
     rows = q.all()
 
@@ -105,7 +112,11 @@ def _legacy_counts_payload(db: Session, category: str, model_id: str | None):
 
     severity_counts = Counter((f.severity or "UNKNOWN").upper() for f in findings)
 
-    total_models = db.query(AIModel).count()
+    # ✅ If model_id is provided, "totalModelsAnalyzed" should reflect that filtered context
+    if model_id:
+        total_models = db.query(AIModel).filter(AIModel.model_id == model_id).count()
+    else:
+        total_models = db.query(AIModel).count()
 
     # models impacted by that category
     models_impacted = len({f.audit_run.model_id for f in findings if f.audit_run})

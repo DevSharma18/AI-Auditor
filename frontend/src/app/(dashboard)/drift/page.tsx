@@ -5,16 +5,29 @@ import PieChart from '@/components/charts/PieChart';
 import BarChart from '@/components/charts/BarChart';
 import { apiGet, safeNumber } from '@/lib/api-client';
 
+type ModelRow = {
+  id: number;
+  model_id: string;
+  name: string;
+};
+
 type MetricPoint = {
   audit_id?: string;
   executed_at?: string | null;
   model_id?: string;
   model_name?: string;
+
   score_100?: number;
   band?: string;
+
   L?: number;
   I?: number;
   R?: number;
+
+  frameworks?: any;
+  signals?: any;
+  alpha?: number;
+  beta?: number;
 };
 
 type MetricScoring = {
@@ -37,40 +50,97 @@ function bandColor(band: string) {
   return '#10b981';
 }
 
-function safeDateLabel(executedAt: string | null | undefined, auditId?: string) {
-  if (!executedAt) return String(auditId || '-');
+function severityColor(severity: string) {
+  const s = String(severity || '').toUpperCase();
+  if (s === 'CRITICAL') return '#dc2626';
+  if (s === 'HIGH') return '#f97316';
+  if (s === 'MEDIUM') return '#fbbf24';
+  if (s === 'LOW') return '#84cc16';
+  return '#6b7280';
+}
+
+function safeDateLabel(executedAt: string | null | undefined, fallback: string) {
+  if (!executedAt) return fallback;
   try {
     return new Date(executedAt).toLocaleDateString();
   } catch {
-    return String(auditId || '-');
+    return fallback;
   }
 }
 
+/**
+ * Enterprise-safe approximations (since backend drift does not yet return PSI/KS/Wasserstein etc.)
+ * These are derived from L/I/R and score_100 (clearly marked as derived).
+ */
+function deriveBaselineFromTrend(trend: MetricPoint[]) {
+  // baseline = average of oldest 3 (or first 1) score_100
+  if (!Array.isArray(trend) || trend.length === 0) return 0;
+  const slice = trend.slice(0, Math.min(3, trend.length));
+  const avg = slice.reduce((acc, x) => acc + safeNumber(x.score_100, 0), 0) / slice.length;
+  return avg;
+}
+
+function pctChange(from: number, to: number) {
+  if (from <= 0) return 0;
+  return Math.round(((to - from) / from) * 100);
+}
+
 export default function DriftPage() {
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [modelsLoading, setModelsLoading] = useState<boolean>(true);
+
   const [error, setError] = useState<string | null>(null);
   const [payload, setPayload] = useState<MetricApiResponse | null>(null);
 
-  useEffect(() => {
-    async function load() {
-      try {
-        setLoading(true);
-        setError(null);
-        const data = await apiGet<MetricApiResponse>('/metrics/drift');
-        setPayload(data);
-      } catch (err: any) {
-        setError(err?.message || 'Failed to load drift scoring');
-      } finally {
-        setLoading(false);
-      }
-    }
+  const [models, setModels] = useState<ModelRow[]>([]);
+  const [selectedModelId, setSelectedModelId] = useState<string>('');
 
-    load();
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
+
+  async function loadModels() {
+    try {
+      setModelsLoading(true);
+      const data = await apiGet<ModelRow[]>('/models');
+      setModels(Array.isArray(data) ? data : []);
+    } catch {
+      setModels([]);
+    } finally {
+      setModelsLoading(false);
+    }
+  }
+
+  async function loadDrift(modelId?: string) {
+    try {
+      setLoading(true);
+      setError(null);
+
+      const qp = modelId ? `?model_id=${encodeURIComponent(modelId)}` : '';
+      const data = await apiGet<MetricApiResponse>(`/metrics/drift${qp}`);
+
+      setPayload(data);
+      setLastUpdatedAt(new Date().toISOString());
+    } catch (err: any) {
+      setError(err?.message || 'Failed to load drift scoring');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadModels();
   }, []);
+
+  useEffect(() => {
+    loadDrift(selectedModelId || undefined);
+  }, [selectedModelId]);
 
   const scoring = payload?.scoring;
   const latest = scoring?.latest || null;
   const trend = Array.isArray(scoring?.trend) ? scoring?.trend : [];
+
+  const scoreNow = Math.round(safeNumber(latest?.score_100, 0));
+  const band = String(latest?.band || 'LOW').toUpperCase();
+  const bandClr = bandColor(band);
 
   const breakdown = useMemo(() => {
     if (!latest) return [];
@@ -101,95 +171,540 @@ export default function DriftPage() {
     };
   }, [trendPoints]);
 
-  const safeTitle = {
-    fontSize: '28px',
-    fontWeight: '700',
-    color: '#1a1a1a',
-    marginBottom: '8px',
-    lineHeight: 1.2,
-    wordBreak: 'break-word' as const,
-  };
+  // ==============================
+  // Intended UI Metrics (Derived)
+  // ==============================
+  const baselineScore = useMemo(() => {
+    const b = deriveBaselineFromTrend(trend);
+    return Math.round(b);
+  }, [trend]);
 
-  const safeSub = {
-    fontSize: '14px',
-    color: '#6b7280',
-    lineHeight: 1.5,
-    wordBreak: 'break-word' as const,
-  };
+  const driftScoreCard = useMemo(() => {
+    const baseline = baselineScore;
+    const current = scoreNow;
+    const changePct = pctChange(Math.max(1, baseline), Math.max(1, current));
+    const status = band; // mapped to band for exec clarity
 
-  if (loading) {
-    return (
-      <div style={{ minHeight: '100vh', background: '#ffffff', padding: '0' }}>
-        <h1 style={safeTitle}>Model Drift Risk</h1>
-        <p style={safeSub}>Loading drift scoring...</p>
-      </div>
-    );
-  }
+    return {
+      baseline: baseline / 100,
+      current: current / 100,
+      change: `${changePct >= 0 ? '+' : ''}${changePct}%`,
+      status,
+    };
+  }, [baselineScore, scoreNow, band]);
 
-  if (error) {
-    return (
-      <div style={{ minHeight: '100vh', background: '#ffffff', padding: '0' }}>
-        <h1 style={safeTitle}>Model Drift Risk</h1>
-        <p style={safeSub}>Unable to load drift scoring.</p>
-        <div style={{ marginTop: 12, color: '#dc2626', fontSize: 13 }}>{error}</div>
-      </div>
-    );
-  }
+  const accuracyDeviation = useMemo(() => {
+    // Backend does not provide accuracy metrics. We show enterprise placeholders.
+    // If drift score increases, we assume accuracy may degrade (derived).
+    const baselineAcc = 94.5;
+    const estimatedDrop = Math.min(12, Math.max(0, Math.round((scoreNow / 100) * 10)));
+    const currentAcc = Math.max(75, Math.round((baselineAcc - estimatedDrop) * 10) / 10);
+    const deviation = Math.round((currentAcc - baselineAcc) * 10) / 10;
 
-  if (!scoring || scoring.status === 'NO_DATA' || !latest) {
-    return (
-      <div style={{ minHeight: '100vh', background: '#ffffff', padding: '0' }}>
-        <h1 style={safeTitle}>Model Drift Risk</h1>
-        <p style={safeSub}>
-          No drift scoring data yet. Drift becomes available once drift detectors are enabled.
-        </p>
-      </div>
-    );
-  }
+    return {
+      baseline: baselineAcc,
+      current: currentAcc,
+      deviation,
+      isDerived: true,
+    };
+  }, [scoreNow]);
 
-  const band = String(latest.band || 'LOW').toUpperCase();
-  const clr = bandColor(band);
+  const distributionShift = useMemo(() => {
+    // Backend doesn't provide PSI/KS/Wasserstein yet — derive stable placeholders from L/I/R.
+    const L = safeNumber(latest?.L, 0);
+    const I = safeNumber(latest?.I, 0);
+    const R = safeNumber(latest?.R, 0);
+
+    const psi = Math.min(0.8, Math.max(0.02, 0.12 + 0.55 * L));
+    const ks = Math.min(0.8, Math.max(0.02, 0.10 + 0.50 * I));
+    const wasserstein = Math.min(0.8, Math.max(0.02, 0.14 + 0.45 * R));
+
+    return {
+      psi,
+      ks,
+      wasserstein,
+      isDerived: true,
+    };
+  }, [latest?.L, latest?.I, latest?.R]);
+
+  // Intended UI alerts table — not available from backend yet.
+  const behaviorAlerts = useMemo(() => {
+    // placeholder generation based on trend direction
+    if (!latest) return [];
+
+    const last3 = trend.slice(-3);
+    const rising =
+      last3.length >= 2 &&
+      safeNumber(last3[last3.length - 1]?.score_100, 0) >
+        safeNumber(last3[0]?.score_100, 0);
+
+    return [
+      {
+        modelName: latest.model_name || latest.model_id || 'Selected model',
+        changeType: rising ? 'Behavior Drift Detected' : 'Stable Behavior Pattern',
+        severity: rising ? (band === 'CRITICAL' || band === 'SEVERE' ? 'CRITICAL' : 'HIGH') : 'LOW',
+        impact: rising ? 'Operational Risk' : 'Minimal',
+        detectedAt: latest.executed_at ? new Date(latest.executed_at).toISOString().slice(0, 10) : '',
+        isPlaceholder: true,
+      },
+    ];
+  }, [latest, trend, band]);
+
+  // Intended UI fairness pie (placeholder)
+  const fairnessData = useMemo(() => {
+    // Backend does not provide group fairness drift yet.
+    // Keep it simple and clearly mark as not available.
+    return [
+      { name: 'False Positives', value: 0 },
+      { name: 'False Negatives', value: 0 },
+      { name: 'Favorable Outcomes', value: 0 },
+    ];
+  }, []);
+
+  const fairnessColors = ['#ef4444', '#f97316', '#10b981'];
+
+  // Intended UI bias patterns + hotspots → placeholders
+  const biasPatterns = useMemo(() => {
+    return [
+      { type: 'Recurring demographic bias signals', count: 0, impact: 'Not available yet', affectedModels: 0 },
+      { type: 'Geographic bias shift patterns', count: 0, impact: 'Not available yet', affectedModels: 0 },
+      { type: 'Decision boundary instability', count: 0, impact: 'Not available yet', affectedModels: 0 },
+    ];
+  }, []);
+
+  const severityHotspots = useMemo(() => {
+    // This should come from backend aggregated drift findings. Not available yet.
+    return [];
+  }, []);
+
+  // ==============================
+  // UI states (NO early return)
+  // ==============================
+  const hasNoData = !scoring || scoring.status === 'NO_DATA' || !latest;
+  const showError = Boolean(error);
+  const showLoading = Boolean(loading);
 
   return (
     <div style={{ minHeight: '100vh', background: '#ffffff', padding: '0' }}>
-      <div style={{ marginBottom: 22 }}>
-        <h1 style={safeTitle}>Model Drift Risk</h1>
+      {/* Page Header */}
+      <div style={{ marginBottom: '24px' }}>
+        <h1 style={safeTitle}>Drift & Bias Monitoring</h1>
         <p style={safeSub}>
-          Drift risk indicates whether the model’s behavior or quality is changing over time.
-          Drift can silently degrade performance and safety.
+          Monitor model drift, reliability degradation, and governance risk signals across your AI systems.
         </p>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 24, marginBottom: 28 }}>
-        <MetricCard title="Drift Risk Score" value={`${Math.round(safeNumber(latest.score_100, 0))}/100`} color={clr} />
-        <MetricCard title="Risk Band" value={band} color={clr} />
-        <MetricCard title="Latest Model" value={latest.model_name || latest.model_id || '-'} color="#3b82f6" />
+      {/* Controls */}
+      <div style={controlsBox}>
+        <div style={leftControls}>
+          <select
+            style={selectStyle}
+            value={selectedModelId}
+            onChange={(e) => setSelectedModelId(e.target.value)}
+            disabled={modelsLoading}
+          >
+            <option value="">
+              {modelsLoading ? 'Loading models...' : 'All Models (Global View)'}
+            </option>
+            {models.map((m) => (
+              <option key={m.id} value={m.model_id}>
+                {m.name} ({m.model_id})
+              </option>
+            ))}
+          </select>
+
+          {showError ? (
+            <span style={statusBadge('ERROR', '#dc2626')}>ERROR</span>
+          ) : hasNoData ? (
+            <span style={statusBadge('NO DATA', '#6b7280')}>NO DATA</span>
+          ) : showLoading ? (
+            <span style={statusBadge('LOADING', '#3b82f6')}>LOADING</span>
+          ) : (
+            <span style={statusBadge('OK', '#10b981')}>OK</span>
+          )}
+
+          {lastUpdatedAt && (
+            <span style={{ fontSize: 12, color: '#6b7280', fontWeight: 700 }}>
+              Last updated: {new Date(lastUpdatedAt).toLocaleString()}
+            </span>
+          )}
+        </div>
+
+        <div style={rightControls}>
+          <button style={btn} onClick={() => loadDrift(selectedModelId || undefined)}>
+            Refresh
+          </button>
+        </div>
       </div>
 
-      <div style={{ border: '2px solid #e5e7eb', padding: 18, marginBottom: 28 }}>
-        <div style={{ fontSize: 16, fontWeight: 900, marginBottom: 8 }}>
-          Simple explanation
+      {/* Error Panel */}
+      {showError && (
+        <div style={{ background: '#fef2f2', border: '2px solid #fca5a5', padding: '20px', marginBottom: '24px' }}>
+          <div style={{ fontSize: '14px', fontWeight: '900', color: '#991b1b' }}>
+            Failed to load drift metrics
+          </div>
+          <div style={{ fontSize: '13px', color: '#7f1d1d', marginTop: '6px', lineHeight: 1.5 }}>
+            {error}
+          </div>
         </div>
-        <div style={{ fontSize: 13, color: '#6b7280', lineHeight: 1.65 }}>
-          Drift does not always mean “bad model”.
-          It means the system may behave differently today than it did yesterday —
-          which creates risk for reliability, safety, and compliance.
-        </div>
-      </div>
+      )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24 }}>
-        <div style={{ border: '2px solid #e5e7eb', padding: 24 }}>
-          <PieChart
-            data={breakdown}
-            colors={['#3b82f6', '#f59e0b', '#dc2626']}
-            title="Scoring Breakdown (L / I / R)"
-          />
+      {/* No Data Panel */}
+      {!showError && hasNoData && (
+        <div style={{ border: '2px solid #e5e7eb', padding: '18px', marginBottom: '24px' }}>
+          <div style={{ fontSize: 14, fontWeight: 900, color: '#111827' }}>
+            No drift scoring data yet
+          </div>
+          <div style={{ fontSize: 13, color: '#6b7280', marginTop: 6, lineHeight: 1.6 }}>
+            Run audits to populate drift scoring. Drift monitoring becomes meaningful when trend history exists.
+          </div>
         </div>
+      )}
 
-        <div style={{ border: '2px solid #e5e7eb', padding: 24 }}>
-          <BarChart data={trendBucketData} color={clr} title="Drift Trend (0–100)" />
-        </div>
-      </div>
+      {/* MAIN CONTENT */}
+      {!showError && !hasNoData && (
+        <>
+          {/* Top Metrics Row (Intended UI layout) */}
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(3, 1fr)',
+              gap: '24px',
+              marginBottom: '48px',
+            }}
+          >
+            {/* Drift Score */}
+            <div style={{ background: '#ffffff', border: '2px solid #e5e7eb', padding: '24px' }}>
+              <div style={metricLabel}>Drift Score</div>
+
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'end', marginBottom: '16px' }}>
+                <div>
+                  <div style={miniLabel}>Baseline</div>
+                  <div style={{ fontSize: '24px', fontWeight: '900', color: '#10b981' }}>
+                    {driftScoreCard.baseline.toFixed(2)}
+                  </div>
+                </div>
+
+                <div style={{ fontSize: '24px', color: '#6b7280' }}>→</div>
+
+                <div>
+                  <div style={miniLabel}>Current</div>
+                  <div style={{ fontSize: '24px', fontWeight: '900', color: bandClr }}>
+                    {driftScoreCard.current.toFixed(2)}
+                  </div>
+                </div>
+              </div>
+
+              <div
+                style={{
+                  padding: '8px 12px',
+                  background: '#fef2f2',
+                  border: `2px solid ${bandClr}`,
+                  textAlign: 'center',
+                }}
+              >
+                <span style={{ fontSize: '14px', fontWeight: '900', color: bandClr }}>
+                  {driftScoreCard.change} Change • {driftScoreCard.status}
+                </span>
+              </div>
+
+              <div style={derivedNote}>
+                Derived from audit trend score_100 (baseline vs current). Backend drift baseline not available yet.
+              </div>
+            </div>
+
+            {/* Accuracy Deviation */}
+            <div style={{ background: '#ffffff', border: '2px solid #e5e7eb', padding: '24px' }}>
+              <div style={metricLabel}>Accuracy Deviation</div>
+
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'end', marginBottom: '16px' }}>
+                <div>
+                  <div style={miniLabel}>Baseline</div>
+                  <div style={{ fontSize: '24px', fontWeight: '900', color: '#10b981' }}>
+                    {accuracyDeviation.baseline.toFixed(1)}%
+                  </div>
+                </div>
+
+                <div style={{ fontSize: '24px', color: '#6b7280' }}>→</div>
+
+                <div>
+                  <div style={miniLabel}>Current</div>
+                  <div style={{ fontSize: '24px', fontWeight: '900', color: '#f97316' }}>
+                    {accuracyDeviation.current.toFixed(1)}%
+                  </div>
+                </div>
+              </div>
+
+              <div
+                style={{
+                  padding: '8px 12px',
+                  background: '#fff7ed',
+                  border: '2px solid #f97316',
+                  textAlign: 'center',
+                }}
+              >
+                <span style={{ fontSize: '14px', fontWeight: '900', color: '#f97316' }}>
+                  {accuracyDeviation.deviation.toFixed(1)}% Deviation
+                </span>
+              </div>
+
+              <div style={derivedNote}>
+                Not available from backend yet — shown as executive placeholder until accuracy telemetry is integrated.
+              </div>
+            </div>
+
+            {/* Output Distribution Shift */}
+            <div style={{ background: '#ffffff', border: '2px solid #e5e7eb', padding: '24px' }}>
+              <div style={metricLabel}>Output Distribution Shift</div>
+
+              <div style={{ display: 'grid', gap: '8px' }}>
+                {[
+                  { label: 'PSI', value: distributionShift.psi, color: '#8b5cf6' },
+                  { label: 'KS', value: distributionShift.ks, color: '#ec4899' },
+                  { label: 'Wasserstein', value: distributionShift.wasserstein, color: '#f59e0b' },
+                ].map((m, idx) => (
+                  <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ fontSize: '13px', color: '#6b7280', fontWeight: '800' }}>{m.label}</span>
+                    <span style={{ fontSize: '18px', fontWeight: '900', color: m.color }}>
+                      {m.value.toFixed(2)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+
+              <div style={derivedNote}>
+                Derived placeholders from L/I/R until backend provides PSI/KS/Wasserstein telemetry.
+              </div>
+            </div>
+          </div>
+
+          {/* Executive Score Cards (consistent across metric pages) */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 24, marginBottom: 28 }}>
+            <MetricCard title="Drift Risk Score" value={`${scoreNow}/100`} color={bandClr} />
+            <MetricCard title="Risk Band" value={band} color={bandClr} />
+            <MetricCard title="Latest Model" value={latest.model_name || latest.model_id || '-'} color="#3b82f6" />
+          </div>
+
+          {/* Explanation Panel */}
+          <div style={{ border: '2px solid #e5e7eb', padding: '18px', marginBottom: '28px' }}>
+            <div style={{ fontSize: 16, fontWeight: 900, color: '#111827', marginBottom: 8 }}>
+              What “Drift Risk” means (Executive View)
+            </div>
+            <div style={{ fontSize: 13, color: '#6b7280', lineHeight: 1.65 }}>
+              Drift indicates the system may behave differently today than it did previously.
+              This can create business risk (wrong decisions), security risk (unexpected behaviors),
+              and governance risk (inconsistent policy compliance).
+              <br />
+              <span style={{ display: 'inline-block', marginTop: 8 }}>
+                Drift score is derived from audit risk scoring: <b>L</b> (likelihood) × <b>I</b> (impact) × <b>R</b> (regulatory sensitivity).
+              </span>
+            </div>
+          </div>
+
+          {/* Sudden Behavior Change Alerts */}
+          <div style={{ marginBottom: '48px' }}>
+            <h2 style={sectionTitle}>Sudden Behavior Change Alerts</h2>
+
+            <div style={{ background: '#ffffff', border: '2px solid #e5e7eb', padding: '24px' }}>
+              <div style={{ fontSize: 12, color: '#6b7280', fontWeight: 700, marginBottom: 14 }}>
+                Alerts are currently generated as placeholders from audit trend direction until backend streams drift events.
+              </div>
+
+              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr style={{ borderBottom: '2px solid #e5e7eb' }}>
+                    <th style={thStyle}>Model Name</th>
+                    <th style={thStyle}>Change Type</th>
+                    <th style={thStyle}>Severity</th>
+                    <th style={thStyle}>Impact</th>
+                    <th style={thStyle}>Detected</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {behaviorAlerts.map((alert, index) => (
+                    <tr key={index} style={{ borderBottom: index < behaviorAlerts.length - 1 ? '1px solid #e5e7eb' : 'none' }}>
+                      <td style={{ padding: '16px', fontSize: '14px', fontWeight: '900', color: '#111827' }}>
+                        {alert.modelName}
+                      </td>
+                      <td style={{ padding: '16px', fontSize: '14px', color: '#6b7280' }}>
+                        {alert.changeType}
+                      </td>
+                      <td style={{ padding: '16px' }}>
+                        <span
+                          style={{
+                            padding: '4px 12px',
+                            background: severityColor(alert.severity),
+                            color: '#ffffff',
+                            fontSize: '12px',
+                            fontWeight: '900',
+                            textTransform: 'uppercase',
+                            letterSpacing: '0.5px',
+                            display: 'inline-block',
+                          }}
+                        >
+                          {alert.severity}
+                        </span>
+                      </td>
+                      <td style={{ padding: '16px', fontSize: '14px', color: '#6b7280' }}>
+                        {alert.impact}
+                      </td>
+                      <td style={{ padding: '16px', fontSize: '14px', color: '#6b7280' }}>
+                        {alert.detectedAt ? new Date(alert.detectedAt).toLocaleDateString() : '-'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Two Column Layout: Fairness + Bias Patterns */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px', marginBottom: '48px' }}>
+            {/* Outcome Fairness by Group */}
+            <div>
+              <h2 style={sectionTitle}>Outcome Fairness by Group</h2>
+              <div style={{ background: '#ffffff', border: '2px solid #e5e7eb', padding: '24px' }}>
+                <div style={{ fontSize: 12, color: '#6b7280', fontWeight: 700, marginBottom: 12 }}>
+                  Not available yet — requires protected attribute telemetry + outcome tracking.
+                </div>
+                <PieChart data={fairnessData} colors={fairnessColors} title="Model Outcome Distribution (N/A)" />
+              </div>
+            </div>
+
+            {/* Recurring Bias Patterns */}
+            <div>
+              <h2 style={sectionTitle}>Recurring Bias Patterns</h2>
+              <div style={{ background: '#ffffff', border: '2px solid #e5e7eb', padding: '24px' }}>
+                <div style={{ fontSize: 12, color: '#6b7280', fontWeight: 700, marginBottom: 14 }}>
+                  Backend does not provide bias pattern drift events yet — placeholder panel for enterprise roadmap.
+                </div>
+
+                <div style={{ display: 'grid', gap: '16px' }}>
+                  {biasPatterns.map((pattern, index) => (
+                    <div
+                      key={index}
+                      style={{
+                        background: '#ffffff',
+                        border: `2px solid #e5e7eb`,
+                        padding: '16px',
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', marginBottom: '8px' }}>
+                        <div style={{ fontSize: '15px', fontWeight: '900', color: '#111827' }}>
+                          {pattern.type}
+                        </div>
+                        <div style={{ fontSize: '20px', fontWeight: '900', color: '#6b7280' }}>
+                          {pattern.count}
+                        </div>
+                      </div>
+
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: '#6b7280', fontWeight: 700 }}>
+                        <span>Impact: {pattern.impact}</span>
+                        <span>{pattern.affectedModels} models affected</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Breakdown + Trend + History */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24, marginBottom: 48 }}>
+            <div>
+              <h2 style={sectionTitle}>Scoring Breakdown (L / I / R)</h2>
+              <div style={{ border: '2px solid #e5e7eb', padding: 24 }}>
+                <PieChart data={breakdown} colors={['#3b82f6', '#f59e0b', '#dc2626']} title="Drift Scoring Breakdown" />
+              </div>
+            </div>
+
+            <div>
+              <h2 style={sectionTitle}>Drift Trend (Last 10 Audits)</h2>
+              <div style={{ border: '2px solid #e5e7eb', padding: 24 }}>
+                <BarChart data={trendBucketData} color={bandClr} title="Drift Trend (0–100)" />
+              </div>
+            </div>
+          </div>
+
+          {/* Audit History Table */}
+          <div style={{ marginBottom: 48 }}>
+            <h2 style={sectionTitle}>Audit History (Drift)</h2>
+
+            <div style={{ border: '2px solid #e5e7eb', overflow: 'hidden' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr style={{ background: '#f9fafb', borderBottom: '2px solid #e5e7eb' }}>
+                    <th style={thStyle}>Executed</th>
+                    <th style={thStyle}>Score</th>
+                    <th style={thStyle}>Band</th>
+                    <th style={thStyle}>Model</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {trend.length === 0 ? (
+                    <tr>
+                      <td style={tdMuted} colSpan={4}>
+                        No drift audit history available yet.
+                      </td>
+                    </tr>
+                  ) : (
+                    trend
+                      .slice()
+                      .reverse()
+                      .map((r, i) => {
+                        const c = bandColor(String(r.band || 'LOW'));
+                        return (
+                          <tr key={i} style={{ borderBottom: '1px solid #e5e7eb' }}>
+                            <td style={tdMuted}>
+                              {r.executed_at ? new Date(r.executed_at).toLocaleString() : '-'}
+                            </td>
+                            <td style={tdStrong}>{Math.round(safeNumber(r.score_100, 0))}</td>
+                            <td style={tdMuted}>
+                              <span
+                                style={{
+                                  padding: '4px 10px',
+                                  border: `2px solid ${c}`,
+                                  color: c,
+                                  fontSize: 12,
+                                  fontWeight: 900,
+                                  textTransform: 'uppercase',
+                                  display: 'inline-block',
+                                }}
+                              >
+                                {String(r.band || 'LOW')}
+                              </span>
+                            </td>
+                            <td style={tdMuted}>{r.model_name || r.model_id || '-'}</td>
+                          </tr>
+                        );
+                      })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Recommended Actions */}
+          <div style={{ marginBottom: 48 }}>
+            <h2 style={sectionTitle}>Recommended Actions</h2>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16 }}>
+              <ActionCard
+                title="Investigate trend acceleration"
+                text="If drift score is rising across recent audits, validate prompts, input distributions, and safety controls."
+              />
+              <ActionCard
+                title="Implement drift guardrails"
+                text="Add deployment gates: block production rollout when Drift band becomes HIGH/SEVERE/CRITICAL."
+              />
+              <ActionCard
+                title="Enable telemetry-backed drift signals"
+                text="Integrate PSI/KS/Wasserstein and accuracy monitoring to replace placeholders with real drift measurements."
+              />
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -206,3 +721,143 @@ function MetricCard({ title, value, color }: { title: string; value: any; color:
     </div>
   );
 }
+
+function ActionCard({ title, text }: { title: string; text: string }) {
+  return (
+    <div style={{ border: '2px solid #e5e7eb', padding: 18 }}>
+      <div style={{ fontSize: 14, fontWeight: 900, color: '#111827', marginBottom: 6 }}>{title}</div>
+      <div style={{ fontSize: 13, color: '#6b7280', lineHeight: 1.6 }}>{text}</div>
+    </div>
+  );
+}
+
+/* Styles */
+const safeTitle = {
+  fontSize: '28px',
+  fontWeight: '700',
+  color: '#1a1a1a',
+  marginBottom: '8px',
+  lineHeight: 1.2,
+  wordBreak: 'break-word' as const,
+};
+
+const safeSub = {
+  fontSize: '14px',
+  color: '#6b7280',
+  lineHeight: 1.5,
+  wordBreak: 'break-word' as const,
+};
+
+const controlsBox = {
+  border: '2px solid #e5e7eb',
+  padding: '14px 16px',
+  marginBottom: '24px',
+  display: 'flex',
+  gap: '12px',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  flexWrap: 'wrap' as const,
+};
+
+const leftControls = {
+  display: 'flex',
+  gap: '12px',
+  alignItems: 'center',
+  flexWrap: 'wrap' as const,
+};
+
+const rightControls = {
+  display: 'flex',
+  gap: '10px',
+  alignItems: 'center',
+  flexWrap: 'wrap' as const,
+};
+
+const selectStyle = {
+  border: '2px solid #e5e7eb',
+  padding: '10px 12px',
+  fontSize: '13px',
+  fontWeight: 700,
+  color: '#111827',
+  background: '#ffffff',
+  outline: 'none',
+  minWidth: 260,
+} as const;
+
+const btn = {
+  border: '2px solid #e5e7eb',
+  padding: '10px 12px',
+  fontSize: 13,
+  fontWeight: 900,
+  color: '#111827',
+  background: '#ffffff',
+  cursor: 'pointer',
+} as const;
+
+const statusBadge = (text: string, color: string) => ({
+  border: `2px solid ${color}`,
+  color,
+  padding: '6px 10px',
+  fontSize: 12,
+  fontWeight: 900,
+  textTransform: 'uppercase' as const,
+  letterSpacing: '0.5px',
+  display: 'inline-block',
+});
+
+const sectionTitle = {
+  fontSize: '20px',
+  fontWeight: '700',
+  color: '#1a1a1a',
+  marginBottom: '24px',
+  borderBottom: '2px solid #e5e7eb',
+  paddingBottom: '12px',
+  lineHeight: 1.2,
+};
+
+const metricLabel = {
+  fontSize: '13px',
+  fontWeight: '900',
+  color: '#6b7280',
+  marginBottom: '12px',
+  textTransform: 'uppercase' as const,
+  letterSpacing: '0.5px',
+};
+
+const miniLabel = {
+  fontSize: '12px',
+  color: '#6b7280',
+  marginBottom: '4px',
+  fontWeight: 700,
+};
+
+const derivedNote = {
+  fontSize: 11,
+  color: '#6b7280',
+  marginTop: 10,
+  fontWeight: 700,
+  lineHeight: 1.4,
+};
+
+const thStyle = {
+  textAlign: 'left' as const,
+  padding: '12px 16px',
+  fontSize: '12px',
+  fontWeight: '900',
+  color: '#6b7280',
+  textTransform: 'uppercase' as const,
+  letterSpacing: '0.5px',
+};
+
+const tdStrong = {
+  padding: '14px 16px',
+  fontSize: '14px',
+  fontWeight: '900',
+  color: '#111827',
+};
+
+const tdMuted = {
+  padding: '14px 16px',
+  fontSize: '13px',
+  color: '#6b7280',
+};
