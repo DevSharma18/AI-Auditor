@@ -1,3 +1,5 @@
+# backend/main.py
+
 from dotenv import load_dotenv
 load_dotenv(dotenv_path=".env")
 
@@ -18,8 +20,15 @@ from .routes_metrics import router as metrics_router
 from .routes_connectors import router as connectors_router
 from .routes_dashboard import router as dashboard_router
 
-# ✅ NEW (Auth Router)
+# ✅ AUTH
 from .routes_auth import router as auth_router
+
+# ✅ MODELS (you already have this file)
+from .routes_models import router as models_router
+
+# ✅ NEW: AUDITS + INCIDENTS (LIVE)
+from .routes_audits import router as audits_router
+from .routes_incidents import router as incidents_router
 
 from .scheduler import start_scheduler, stop_scheduler
 
@@ -34,7 +43,6 @@ logger = logging.getLogger("ai-auditor")
 
 # -------------------------------------------------
 # SIMPLE IN-MEMORY RATE LIMIT
-# (No Redis, no DB changes)
 # -------------------------------------------------
 RATE_LIMIT_ENABLED = os.environ.get("RATE_LIMIT_ENABLED", "true").lower() == "true"
 RATE_LIMIT_RPM = int(os.environ.get("RATE_LIMIT_RPM", "120"))  # per IP per minute
@@ -85,10 +93,6 @@ app.add_middleware(
 
 # -------------------------------------------------
 # ENTERPRISE MIDDLEWARE
-# - request_id tracing
-# - structured logging
-# - rate limiting
-# - safe global error handling
 # -------------------------------------------------
 @app.middleware("http")
 async def enterprise_middleware(request: Request, call_next: Callable):
@@ -146,9 +150,12 @@ app.include_router(router, prefix="/api")
 app.include_router(metrics_router, prefix="/api")
 app.include_router(connectors_router, prefix="/api")
 app.include_router(dashboard_router, prefix="/api")
-
-# ✅ AUTH ROUTES
 app.include_router(auth_router, prefix="/api")
+app.include_router(models_router, prefix="/api")
+
+# ✅ NEW LIVE ROUTES
+app.include_router(audits_router, prefix="/api")
+app.include_router(incidents_router, prefix="/api")
 
 
 # -------------------------------------------------

@@ -1,7 +1,11 @@
-from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
+from __future__ import annotations
+
 from datetime import datetime
 from enum import Enum
+from typing import Optional, Dict, Any
+
+from pydantic import BaseModel
+from pydantic.config import ConfigDict
 
 
 # =========================
@@ -26,6 +30,9 @@ class AuditResultEnum(str, Enum):
 # =========================
 
 class RegisterModelRequest(BaseModel):
+    # ✅ Fix Pydantic protected namespace warning
+    model_config = ConfigDict(protected_namespaces=())
+
     model_id: str
     name: str
 
@@ -34,14 +41,20 @@ class RegisterModelRequest(BaseModel):
 
     headers: Dict[str, str]
 
-    # 🔑 PROVIDER-SPECIFIC FULL PAYLOAD TEMPLATE
+    # PROVIDER-SPECIFIC FULL PAYLOAD TEMPLATE (must contain {{PROMPT}})
     request_template: Dict[str, Any]
 
-    # 🔑 RESPONSE EXTRACTION PATH
+    # RESPONSE EXTRACTION PATH
     response_path: str
 
 
 class ModelResponse(BaseModel):
+    # ✅ Fix Pydantic protected namespace warning
+    model_config = ConfigDict(
+        protected_namespaces=(),
+        from_attributes=True
+    )
+
     id: int
     model_id: str
     name: str
@@ -49,18 +62,22 @@ class ModelResponse(BaseModel):
     model_type: str
     connection_type: str
     created_at: datetime
+
     last_audit_status: Optional[str] = None
     last_audit_time: Optional[datetime] = None
     audit_frequency: Optional[str] = None
 
-    class Config:
-        from_attributes = True
-
 
 class AuditResponse(BaseModel):
+    # ✅ Fix Pydantic protected namespace warning
+    model_config = ConfigDict(protected_namespaces=())
+
     id: int
     audit_id: str
+
+    # internal numeric FK stored in your DB
     model_id: int
+
     audit_type: str
     executed_at: datetime
     execution_status: str

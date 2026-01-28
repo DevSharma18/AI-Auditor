@@ -1,5 +1,3 @@
-# backend/audit_engine.py
-
 from __future__ import annotations
 
 import uuid
@@ -7,6 +5,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
+from sqlalchemy import desc
 
 from .models import (
     AIModel,
@@ -21,14 +20,14 @@ from .models import (
 from .model_executor import ModelExecutor
 from .audit_prompts import PROMPT_CATEGORIES
 
-# ✅ Metrics (prompt-agnostic)
+# Metrics
 from .metrics.bias import BiasMetric
 from .metrics.pii import PIIMetric
 from .metrics.hallucination import HallucinationMetric
 from .metrics.compliance import ComplianceMetric
 from .metrics.drift import DriftMetric
 
-# ✅ Enterprise scoring
+# Scoring
 from .scoring.normalization import IMPACT_BASELINES, clamp01
 from .scoring.metrics import MetricScore, normalize_likelihood
 from .scoring.regulatory_engine import compute_regulatory_weight
@@ -44,18 +43,18 @@ logger = logging.getLogger("ai-auditor")
 
 CATEGORY_MAP = {
     "bias": "bias",
-    "bias_score": "bias",
     "hallucination": "hallucination",
-    "hallucination_score": "hallucination",
     "pii": "pii",
-    "pii_score": "pii",
-    "system": "compliance",
     "compliance": "compliance",
     "drift": "drift",
 }
 
 METRIC_FAMILIES = ["bias", "pii", "hallucination", "compliance", "drift"]
 
+
+# =========================================================
+# HELPERS
+# =========================================================
 
 def _norm(name: str) -> str:
     return (name or "").strip().lower()
@@ -88,20 +87,17 @@ def _compute_likelihood(
         fam = _metric_family(f.get("category", ""), f.get("metric_name", ""))
         per_metric_count[fam] = per_metric_count.get(fam, 0) + 1
 
-    denom = max(1, int(interactions_count))
-
+    denom = max(1, interactions_count)
     out: Dict[str, Dict[str, Any]] = {}
+
     for metric, cnt in per_metric_count.items():
-        freq_ratio = float(cnt / denom)
-        freq_ratio = float(min(freq_ratio, 1.0))
-
+        freq_ratio = min(float(cnt / denom), 1.0)
         L = float(normalize_likelihood(freq_ratio))
-
         out[metric] = {
             "L": L,
             "signals": {
-                "finding_count": int(cnt),
-                "interactions": int(interactions_count),
+                "finding_count": cnt,
+                "interactions": interactions_count,
                 "frequency_ratio": round(freq_ratio, 4),
             },
         }
@@ -112,7 +108,7 @@ def _compute_likelihood(
                 "L": 0.0,
                 "signals": {
                     "finding_count": 0,
-                    "interactions": int(interactions_count),
+                    "interactions": interactions_count,
                     "frequency_ratio": 0.0,
                 },
             }
@@ -120,10 +116,13 @@ def _compute_likelihood(
     return out
 
 
+# =========================================================
+# AUDIT ENGINE
+# =========================================================
+
 class AuditEngine:
     def __init__(self, db: Session):
         self.db = db
-
         self.metric_registry = {
             "hallucination": HallucinationMetric(),
             "bias": BiasMetric(),
@@ -138,28 +137,13 @@ class AuditEngine:
         policy=None,
         audit_public_id: Optional[str] = None,
     ) -> AuditRun:
-        """
-        ✅ Enterprise Active Audit Engine
 
-        FIXED BEHAVIOR:
-        - If audit_public_id provided:
-            - reuse the SAME AuditRun row created by routes.py
-            - attach interactions/findings/metrics/summary to it
-        - If audit_public_id not provided:
-            - create a new AuditRun row (fallback)
-
-        Always commits results into DB.
-        """
-
-        # ---------------------------------------------------------
-        # EvidenceSource
-        # ---------------------------------------------------------
+        # -------------------------------------------------
+        # Evidence Source
+        # -------------------------------------------------
         evidence = (
             self.db.query(EvidenceSource)
-            .filter(
-                EvidenceSource.model_id == model.id,
-                EvidenceSource.source_type == "api",
-            )
+            .filter(EvidenceSource.model_id == model.id)
             .first()
         )
         if not evidence:
@@ -167,22 +151,19 @@ class AuditEngine:
 
         executor = ModelExecutor(evidence.config)
 
-        # ---------------------------------------------------------
-        # Load or create audit row
-        # ---------------------------------------------------------
-        audit: Optional[AuditRun] = None
-
+        # -------------------------------------------------
+        # Load or create audit run
+        # -------------------------------------------------
         if audit_public_id:
-            audit = self.db.query(AuditRun).filter(AuditRun.audit_id == audit_public_id).first()
+            audit = (
+                self.db.query(AuditRun)
+                .filter(AuditRun.audit_id == audit_public_id)
+                .first()
+            )
             if not audit:
-                raise RuntimeError(f"AuditRun not found for audit_id={audit_public_id}")
-
-            # make sure it is marked running at start
+                raise RuntimeError("AuditRun not found")
             audit.execution_status = "RUNNING"
             audit.audit_result = "RUNNING"
-            audit.executed_at = audit.executed_at or datetime.utcnow()
-            self.db.commit()
-
         else:
             audit_public_id = f"active_{uuid.uuid4().hex[:12]}"
             audit = AuditRun(
@@ -197,125 +178,60 @@ class AuditEngine:
             self.db.commit()
             self.db.refresh(audit)
 
-        # ---------------------------------------------------------
-        # Run prompts
-        # ---------------------------------------------------------
         interactions_buffer: List[Dict[str, Any]] = []
         findings_buffer: List[Dict[str, Any]] = []
 
-        prompts_executed = 0
-        total_latency_seconds = 0.0
-
-        total_prompts = sum(
-            len(v) for v in PROMPT_CATEGORIES.values() if isinstance(v, list)
-        )
-
-        logger.info(f"Active audit START model={model.model_id} prompts={total_prompts} audit_id={audit.audit_id}")
-
-        executed_counter = 0
-
+        # -------------------------------------------------
+        # Run prompts
+        # -------------------------------------------------
         for category, prompts in PROMPT_CATEGORIES.items():
             metric = self.metric_registry.get(category)
-
             if not isinstance(prompts, list):
                 continue
 
             for p in prompts:
-                executed_counter += 1
-
-                if executed_counter % 25 == 0:
-                    logger.info(
-                        f"Active audit progress model={model.model_id} audit_id={audit.audit_id} executed={executed_counter}/{total_prompts}"
-                    )
-
-                prompt_id = str(p.get("id") or f"{category}_{uuid.uuid4().hex[:6]}")
-                prompt_text = str(p.get("prompt") or "")
-
-                if not prompt_text.strip():
+                prompt_id = str(p.get("id") or uuid.uuid4().hex[:8])
+                prompt_text = str(p.get("prompt") or "").strip()
+                if not prompt_text:
                     continue
 
-                try:
-                    execution = executor.execute_active_prompt(prompt_text)
-                    response_text = execution.get("content", "")
-                    latency_seconds = float(execution.get("latency", 0.0))
-
-                except Exception as exc:
-                    findings_buffer.append(
-                        {
-                            "category": "compliance",
-                            "severity": "HIGH",
-                            "metric_name": "execution_failure",
-                            "description": str(exc),
-                            "prompt_id": prompt_id,
-                        }
-                    )
-                    logger.warning(
-                        f"Prompt execution failed model={model.model_id} prompt_id={prompt_id} category={category} err={exc}"
-                    )
-                    continue
-
-                prompts_executed += 1
-                total_latency_seconds += latency_seconds
+                execution = executor.execute_active_prompt(prompt_text)
+                response_text = str(execution.get("content") or "")
+                latency = float(execution.get("latency") or 0.0)
 
                 interactions_buffer.append(
                     {
                         "prompt_id": prompt_id,
                         "prompt": prompt_text,
-                        "response": response_text if isinstance(response_text, str) else str(response_text),
-                        "latency_ms": round(latency_seconds * 1000, 2),
+                        "response": response_text,
+                        "latency_ms": latency * 1000,
                     }
                 )
 
-                if metric:
-                    result = metric.evaluate(prompt=prompt_text, response=str(response_text or ""))
+                if not metric:
+                    continue
 
-                    results_list: List[Any] = []
-                    if result is None:
-                        results_list = []
-                    elif isinstance(result, list):
-                        results_list = result
-                    else:
-                        results_list = [result]
+                results = metric.evaluate(prompt_text, response_text) or []
 
-                    for r in results_list:
-                        fam = _metric_family(category, getattr(r, "metric", "") or category)
+                for r in results:
+                    fam = _metric_family(category, r.metric)
 
-                        findings_buffer.append(
-                            {
-                                "category": CATEGORY_MAP.get(fam, fam),
-                                "severity": str(getattr(r, "severity", "LOW") or "LOW").upper(),
-                                "metric_name": str(getattr(r, "metric", fam)),
-                                "description": str(getattr(r, "explanation", "") or ""),
-                                "prompt_id": prompt_id,
-                            }
-                        )
+                    findings_buffer.append(
+                        {
+                            "category": fam,
+                            "severity": r.severity,
+                            "metric_name": r.metric,
+                            "description": r.explanation,
+                            "prompt_id": prompt_id,
+                            # ✅ SOURCE OF TRUTH: metric emits enrichment
+                            "extra": getattr(r, "extra", None),
+                        }
+                    )
 
-        logger.info(
-            f"Active audit END model={model.model_id} audit_id={audit.audit_id} prompts_ok={prompts_executed}/{total_prompts} interactions={len(interactions_buffer)} findings={len(findings_buffer)}"
-        )
-
-        # ---------------------------------------------------------
-        # Determine result
-        # ---------------------------------------------------------
-        critical = sum(1 for f in findings_buffer if f.get("severity") == "CRITICAL")
-        high = sum(1 for f in findings_buffer if f.get("severity") == "HIGH")
-
-        audit_result = (
-            "AUDIT_FAIL"
-            if critical > 0
-            else "AUDIT_WARN"
-            if high > 0
-            else "AUDIT_PASS"
-        )
-
-        avg_latency_seconds: Optional[float] = None
-        if prompts_executed > 0:
-            avg_latency_seconds = round(total_latency_seconds / prompts_executed, 3)
-
-        # ---------------------------------------------------------
-        # Persist interactions & findings
-        # ---------------------------------------------------------
-        prompt_to_interaction_id: Dict[str, int] = {}
+        # -------------------------------------------------
+        # Persist interactions
+        # -------------------------------------------------
+        prompt_to_interaction: Dict[str, int] = {}
 
         for i in interactions_buffer:
             row = AuditInteraction(
@@ -327,128 +243,125 @@ class AuditEngine:
             )
             self.db.add(row)
             self.db.flush()
-            prompt_to_interaction_id[i["prompt_id"]] = int(row.id)
+            prompt_to_interaction[i["prompt_id"]] = row.id
 
+        # -------------------------------------------------
+        # Persist findings
+        # -------------------------------------------------
         for f in findings_buffer:
-            pid = str(f.get("prompt_id") or "")
-            linked_interaction_id = prompt_to_interaction_id.get(pid)
-
             self.db.add(
                 AuditFinding(
                     finding_id=f"finding_{uuid.uuid4().hex[:8]}",
                     audit_id=audit.id,
-                    prompt_id=pid if pid else None,
-                    interaction_id=linked_interaction_id,
-                    category=str(f.get("category") or "compliance"),
-                    severity=str(f.get("severity") or "LOW"),
-                    metric_name=str(f.get("metric_name") or "unknown"),
-                    description=str(f.get("description") or ""),
+                    prompt_id=f["prompt_id"],
+                    interaction_id=prompt_to_interaction.get(f["prompt_id"]),
+                    category=f["category"],
+                    severity=f["severity"],
+                    metric_name=f["metric_name"],
+                    description=f["description"],
+                    extra=f.get("extra"),
                 )
             )
 
         self.db.flush()
 
-        # ---------------------------------------------------------
+        # -------------------------------------------------
         # Metric scoring
-        # ---------------------------------------------------------
-        likelihood_map = _compute_likelihood(
-            findings=findings_buffer,
-            interactions_count=len(interactions_buffer),
-        )
-
+        # -------------------------------------------------
+        likelihoods = _compute_likelihood(findings_buffer, len(interactions_buffer))
         metric_scores: List[MetricScore] = []
 
-        for metric_name in METRIC_FAMILIES:
-            L = float(likelihood_map.get(metric_name, {}).get("L", 0.0))
-            I = float(IMPACT_BASELINES.get(metric_name, 0.5))
-
-            R, breakdown = compute_regulatory_weight(metric_name)
-            R = float(R)
+        for fam in METRIC_FAMILIES:
+            L = likelihoods[fam]["L"]
+            I = IMPACT_BASELINES.get(fam, 0.5)
+            R, breakdown = compute_regulatory_weight(fam)
 
             S, score_100 = score_metric_severity(L=L, I=I, R=R)
             band = severity_band_from_score_100(score_100)
 
-            ms = MetricScore(
-                metric=metric_name,  # type: ignore
-                L=clamp01(L),
-                I=clamp01(I),
-                R=clamp01(R),
-                alpha=1.0,
-                beta=1.5,
-                w=1.0,
-                S=float(S),
-                score_100=float(score_100),
-                band=str(band),
-                frameworks=breakdown,
-                signals=likelihood_map.get(metric_name, {}).get("signals", {}),
+            metric_scores.append(
+                MetricScore(
+                    metric=fam,
+                    L=clamp01(L),
+                    I=clamp01(I),
+                    R=clamp01(R),
+                    S=S,
+                    score_100=score_100,
+                    band=band,
+                    frameworks=breakdown,
+                    signals=likelihoods[fam]["signals"],
+                )
             )
-            metric_scores.append(ms)
 
             self.db.add(
                 AuditMetricScore(
                     audit_id=audit.id,
-                    metric_name=metric_name,
-                    likelihood=float(ms.L),
-                    impact=float(ms.I),
-                    regulatory_weight=float(ms.R),
-                    alpha=float(ms.alpha),
-                    beta=float(ms.beta),
-                    severity_score=float(ms.S),
-                    severity_score_100=float(ms.score_100),
-                    severity_band=str(ms.band),
-                    strategic_weight=float(ms.w),
-                    framework_breakdown=ms.frameworks or {},
-                    signals=ms.signals or {},
+                    metric_name=fam,
+                    likelihood=L,
+                    impact=I,
+                    regulatory_weight=R,
+                    severity_score=S,
+                    severity_score_100=score_100,
+                    severity_band=band,
+                    framework_breakdown=breakdown,
+                    signals=likelihoods[fam]["signals"],
                 )
             )
 
-        self.db.flush()
+        # -------------------------------------------------
+        # Drift baseline & delta (LIVE)
+        # -------------------------------------------------
+        prev_drift = (
+            self.db.query(AuditMetricScore)
+            .join(AuditRun, AuditMetricScore.audit_id == AuditRun.id)
+            .filter(
+                AuditMetricScore.metric_name == "drift",
+                AuditRun.model_id == model.id,
+                AuditRun.id != audit.id,
+            )
+            .order_by(desc(AuditRun.executed_at))
+            .first()
+        )
 
-        # ---------------------------------------------------------
-        # Global severity summary
-        # ---------------------------------------------------------
-        _, global_score_100, global_band = score_global_severity(metric_scores)
+        current_drift = next((m for m in metric_scores if m.metric == "drift"), None)
+
+        drift_baseline = prev_drift.severity_score_100 if prev_drift else None
+        drift_delta = (
+            current_drift.score_100 - drift_baseline
+            if (current_drift and drift_baseline is not None)
+            else 0.0
+        )
+
+        # -------------------------------------------------
+        # Summary
+        # -------------------------------------------------
+        _, global_score, global_band = score_global_severity(metric_scores)
 
         self.db.add(
             AuditSummary(
                 audit_id=audit.id,
-                drift_score=None,
-                bias_score=None,
-                risk_score=float(global_score_100),
+                risk_score=global_score,
                 total_findings=len(findings_buffer),
-                critical_findings=critical,
-                high_findings=high,
+                critical_findings=sum(1 for f in findings_buffer if f["severity"] == "CRITICAL"),
+                high_findings=sum(1 for f in findings_buffer if f["severity"] == "HIGH"),
                 metrics_snapshot={
-                    "prompts_executed": prompts_executed,
-                    "avg_latency_seconds": avg_latency_seconds,
-                    "dynamic_scoring": {
-                        "global_score_100": global_score_100,
-                        "global_band": global_band,
-                        "per_metric": [
-                            {
-                                "metric": ms.metric,
-                                "L": ms.L,
-                                "I": ms.I,
-                                "R": ms.R,
-                                "S": ms.S,
-                                "score_100": ms.score_100,
-                                "band": ms.band,
-                                "w": ms.w,
-                                "frameworks": ms.frameworks or {},
-                                "signals": ms.signals or {},
-                            }
-                            for ms in metric_scores
-                        ],
-                    },
+                    "drift": {
+                        "baseline": drift_baseline,
+                        "current": current_drift.score_100 if current_drift else None,
+                        "delta": drift_delta,
+                    }
                 },
             )
         )
 
-        # ---------------------------------------------------------
-        # Final audit status in same row
-        # ---------------------------------------------------------
         audit.execution_status = "SUCCESS"
-        audit.audit_result = audit_result
+        audit.audit_result = (
+            "AUDIT_FAIL"
+            if any(f["severity"] == "CRITICAL" for f in findings_buffer)
+            else "AUDIT_WARN"
+            if any(f["severity"] == "HIGH" for f in findings_buffer)
+            else "AUDIT_PASS"
+        )
 
         self.db.commit()
         self.db.refresh(audit)

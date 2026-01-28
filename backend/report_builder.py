@@ -60,17 +60,18 @@ def build_structured_report(
     global_risk: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """
-    Clean structured report for CISO reporting:
-    - Groups duplicate findings into one issue
+    Enterprise structured report:
+    - Deduplicates findings into "issues"
     - Adds occurrences count
-    - Adds evidence samples PER issue using interaction_id mapping
-    - Includes metric scoring (L/I/R/S) + global risk posture
+    - Adds limited evidence references (IDs + metadata only)
+    - Includes metric scoring + global risk
+    - Does NOT dump all prompt/response logs
     """
 
     metric_scores = metric_scores or []
     global_risk = global_risk or {}
 
-    # Index interactions by interaction_id for quick lookup
+    # Index interactions by id (internal linkage only)
     interaction_by_id: Dict[int, Dict[str, Any]] = {}
     for i in interactions:
         iid = i.get("interaction_id")
@@ -91,7 +92,7 @@ def build_structured_report(
     }
 
     # ----------------------------
-    # GROUP FINDINGS
+    # GROUP FINDINGS (DEDUP)
     # ----------------------------
     grouped_map: Dict[str, Dict[str, Any]] = {}
     grouped_order: List[str] = []
@@ -116,7 +117,7 @@ def build_structured_report(
                 "remediation": f.get("remediation") or None,
                 "occurrences": 0,
 
-                # Evidence samples linked to interaction_id
+                # evidence references only (do not include raw text)
                 "evidence_samples": [],
             }
 
@@ -128,7 +129,7 @@ def build_structured_report(
         if _severity_rank(incoming_sev) > _severity_rank(current_sev):
             grouped_map[fp]["severity"] = incoming_sev
 
-        # Add evidence sample (max 3)
+        # Add evidence sample (max 3 refs per issue)
         if len(grouped_map[fp]["evidence_samples"]) < 3:
             interaction_id = f.get("interaction_id")
             prompt_id = f.get("prompt_id")
@@ -137,16 +138,15 @@ def build_structured_report(
                 "finding_id": _safe(f.get("finding_id")),
                 "prompt_id": prompt_id,
                 "interaction_id": interaction_id,
-                "description": _safe(f.get("description")).strip(),
+                "created_at": None,
+                "latency_ms": None,
             }
 
-            # attach prompt/response if possible
+            # attach only metadata
             if isinstance(interaction_id, int) and interaction_id in interaction_by_id:
                 src = interaction_by_id[interaction_id]
-                evidence_item["prompt"] = src.get("prompt")
-                evidence_item["response"] = src.get("response")
-                evidence_item["latency_ms"] = src.get("latency_ms")
                 evidence_item["created_at"] = src.get("created_at")
+                evidence_item["latency_ms"] = src.get("latency_ms")
 
             grouped_map[fp]["evidence_samples"].append(evidence_item)
 
@@ -174,6 +174,20 @@ def build_structured_report(
     ]
 
     # ----------------------------
+    # TOP-LEVEL EVIDENCE SAMPLES (for PDF)
+    # - keep max 3 across whole report
+    # - references only (no raw prompt/response)
+    # ----------------------------
+    flat_evidence: List[Dict[str, Any]] = []
+    for issue in grouped_findings:
+        for e in issue.get("evidence_samples", []) or []:
+            if len(flat_evidence) >= 3:
+                break
+            flat_evidence.append(e)
+        if len(flat_evidence) >= 3:
+            break
+
+    # ----------------------------
     # FINAL STRUCTURE (Stable Contract)
     # ----------------------------
     return {
@@ -181,10 +195,12 @@ def build_structured_report(
         "summary": summary,
         "executive_summary": executive_summary,
 
-        # NEW: scoring blocks
         "global_risk": global_risk,
         "metric_scores": metric_scores,
 
         "grouped_findings": grouped_findings,
         "unique_issue_count": len(grouped_findings),
+
+        # ✅ used by report_pdf_reportlab.py
+        "evidence_samples": flat_evidence,
     }

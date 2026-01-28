@@ -553,7 +553,7 @@ export default function PIIPage() {
             </div>
 
             <div style={{ marginTop: 14, fontSize: 12, color: '#111827', fontWeight: 900 }}>
-              ✅ Next backend enhancement: classify PII type + source attribution per finding
+              Next backend enhancement: classify PII type + source attribution per finding
             </div>
           </div>
         </div>

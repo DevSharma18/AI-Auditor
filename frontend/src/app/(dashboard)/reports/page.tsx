@@ -17,7 +17,7 @@ type Model = {
 
 type Audit = {
   audit_id: string;
-  audit_result: string; // RUNNING | FAILED | AUDIT_PASS | AUDIT_WARN | AUDIT_FAIL
+  audit_result: string;
   executed_at: string;
 };
 
@@ -38,7 +38,6 @@ function parseAuditResult(raw: string): { execution: ExecutionStatus; risk: Risk
   if (r === 'AUDIT_WARN') return { execution: 'SUCCESS', risk: 'MEDIUM' };
   if (r === 'AUDIT_FAIL') return { execution: 'SUCCESS', risk: 'HIGH' };
 
-  // fallback: treat unknown as SUCCESS but no risk classification
   return { execution: 'SUCCESS', risk: '—' };
 }
 
@@ -96,23 +95,18 @@ export default function ReportsPage() {
 
   const [activeTab, setActiveTab] = useState<'model' | 'log'>('model');
 
-  // live data
   const [models, setModels] = useState<Model[]>([]);
   const [audits, setAudits] = useState<Audit[]>([]);
 
-  // state
   const [selectedModel, setSelectedModel] = useState('');
   const [loadingModels, setLoadingModels] = useState(true);
   const [loadingAudits, setLoadingAudits] = useState(false);
   const [runningAudit, setRunningAudit] = useState(false);
-  const [downloadingAuditId, setDownloadingAuditId] = useState<string | null>(null);
 
+  const [downloadingAuditId, setDownloadingAuditId] = useState<string | null>(null);
   const [modelsError, setModelsError] = useState<string | null>(null);
   const [auditsError, setAuditsError] = useState<string | null>(null);
 
-  /* =========================
-       LOAD MODELS
-    ========================= */
   async function fetchModels() {
     try {
       setModelsError(null);
@@ -132,9 +126,6 @@ export default function ReportsPage() {
     fetchModels();
   }, []);
 
-  /* =========================
-       LOAD AUDITS FOR MODEL
-    ========================= */
   async function loadAudits(modelId: string) {
     if (!modelId) {
       setAudits([]);
@@ -159,9 +150,6 @@ export default function ReportsPage() {
     if (selectedModel) loadAudits(selectedModel);
   }, [selectedModel]);
 
-  /* =========================
-       RUN AUDIT
-    ========================= */
   async function runAudit() {
     if (!selectedModel) {
       alert('Please select a model');
@@ -181,10 +169,7 @@ export default function ReportsPage() {
     }
   }
 
-  /* =========================
-       DOWNLOAD REPORT
-    ========================= */
-  async function downloadAuditReport(auditId: string) {
+  async function downloadAuditJson(auditId: string) {
     try {
       setDownloadingAuditId(auditId);
 
@@ -205,21 +190,34 @@ export default function ReportsPage() {
     }
   }
 
-  /* =========================
-       UI
-    ========================= */
+  async function downloadAuditPdf(auditId: string) {
+    try {
+      setDownloadingAuditId(auditId);
+
+      const blob = await apiGetBlob(`/audits/${auditId}/download-pdf`);
+
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${auditId}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err: any) {
+      alert(`PDF download failed: ${err?.message || 'Unknown error'}`);
+    } finally {
+      setDownloadingAuditId(null);
+    }
+  }
 
   return (
     <div style={{ background: '#fafafa', minHeight: '100vh' }}>
-      {/* Header */}
       <div style={header}>
         <h1 style={title}>Audits</h1>
-        <p style={subtitle}>
-          Run and review model audits (prompt/response evidence stored in database)
-        </p>
+        <p style={subtitle}>Run and review model audits (evidence stored in database)</p>
       </div>
 
-      {/* Tabs */}
       <div style={tabs}>
         <button style={tab(activeTab === 'model')} onClick={() => setActiveTab('model')}>
           Model Auditing
@@ -229,9 +227,6 @@ export default function ReportsPage() {
         </button>
       </div>
 
-      {/* =========================
-         MODEL AUDITING
-      ========================= */}
       {activeTab === 'model' && (
         <>
           <div style={card}>
@@ -247,9 +242,7 @@ export default function ReportsPage() {
               style={input}
               disabled={loadingModels}
             >
-              <option value="">
-                {loadingModels ? 'Loading models…' : 'Choose a model'}
-              </option>
+              <option value="">{loadingModels ? 'Loading models…' : 'Choose a model'}</option>
               {models.map((m) => (
                 <option key={m.id} value={m.model_id}>
                   {m.name} ({m.model_id})
@@ -258,9 +251,7 @@ export default function ReportsPage() {
             </select>
 
             {modelsError && (
-              <div style={{ marginTop: 12, color: '#b91c1c', fontSize: 13 }}>
-                {modelsError}
-              </div>
+              <div style={{ marginTop: 12, color: '#b91c1c', fontSize: 13 }}>{modelsError}</div>
             )}
 
             <div style={{ marginTop: 24, textAlign: 'right' }}>
@@ -278,12 +269,7 @@ export default function ReportsPage() {
             </div>
           </div>
 
-          {/* =========================
-             RECENT AUDITS (REAL DB)
-          ========================= */}
-          <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 16 }}>
-            Recent Model Audits
-          </h3>
+          <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 16 }}>Recent Model Audits</h3>
 
           {!selectedModel ? (
             <div style={emptyBox}>Select a model to view audit history.</div>
@@ -291,9 +277,7 @@ export default function ReportsPage() {
             <div style={emptyBox}>Loading audits…</div>
           ) : auditsError ? (
             <div style={emptyBox}>
-              <div style={{ color: '#b91c1c', fontWeight: 900, marginBottom: 6 }}>
-                Failed to load audits
-              </div>
+              <div style={{ color: '#b91c1c', fontWeight: 900, marginBottom: 6 }}>Failed to load audits</div>
               <div style={{ color: '#6b7280', fontSize: 13 }}>{auditsError}</div>
             </div>
           ) : audits.length === 0 ? (
@@ -319,7 +303,7 @@ export default function ReportsPage() {
                   <div
                     key={a.audit_id}
                     style={auditRow}
-                    onClick={() => router.push(`/reports/auditId/${a.audit_id}`)}
+                    onClick={() => router.push(`/reports/${a.audit_id}`)}
                   >
                     <div style={{ fontFamily: 'monospace', fontSize: 13 }}>{a.audit_id}</div>
 
@@ -335,7 +319,7 @@ export default function ReportsPage() {
                       {a.executed_at ? new Date(a.executed_at).toLocaleString() : '—'}
                     </div>
 
-                    <div style={{ textAlign: 'right' }}>
+                    <div style={{ textAlign: 'right', display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
                       <button
                         style={{
                           ...smallBtn,
@@ -345,10 +329,25 @@ export default function ReportsPage() {
                         disabled={downloadingAuditId === a.audit_id}
                         onClick={(e) => {
                           e.stopPropagation();
-                          downloadAuditReport(a.audit_id);
+                          downloadAuditJson(a.audit_id);
                         }}
                       >
-                        {downloadingAuditId === a.audit_id ? 'Downloading…' : 'Download'}
+                        JSON
+                      </button>
+
+                      <button
+                        style={{
+                          ...smallBtn,
+                          opacity: downloadingAuditId === a.audit_id ? 0.6 : 1,
+                          cursor: downloadingAuditId === a.audit_id ? 'not-allowed' : 'pointer',
+                        }}
+                        disabled={downloadingAuditId === a.audit_id}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          downloadAuditPdf(a.audit_id);
+                        }}
+                      >
+                        PDF
                       </button>
                     </div>
                   </div>
@@ -359,9 +358,6 @@ export default function ReportsPage() {
         </>
       )}
 
-      {/* =========================
-         LOG AUDITING (PLACEHOLDER)
-      ========================= */}
       {activeTab === 'log' && (
         <div style={card}>
           <h2 style={sectionTitle}>Log Auditing</h2>
@@ -468,7 +464,7 @@ const emptyBox = {
 
 const auditHeaderRow = {
   display: 'grid',
-  gridTemplateColumns: '1fr 140px 140px 220px 140px',
+  gridTemplateColumns: '1fr 140px 140px 220px 180px',
   gap: 12,
   paddingBottom: 12,
   borderBottom: '2px solid #e5e7eb',
@@ -479,7 +475,7 @@ const auditHeaderRow = {
 
 const auditRow = {
   display: 'grid',
-  gridTemplateColumns: '1fr 140px 140px 220px 140px',
+  gridTemplateColumns: '1fr 140px 140px 220px 180px',
   gap: 12,
   padding: '12px 0',
   borderBottom: '1px solid #e5e7eb',

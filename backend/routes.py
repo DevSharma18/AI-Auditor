@@ -92,7 +92,6 @@ def list_models(db: Session = Depends(get_db)):
             .first()
         )
 
-        # ✅ Enterprise: display RUNNING if execution_status is RUNNING
         last_status = None
         last_time = None
         if last_audit:
@@ -102,7 +101,6 @@ def list_models(db: Session = Depends(get_db)):
             elif last_audit.execution_status == "FAILED":
                 last_status = "FAILED"
             else:
-                # SUCCESS (completed): show PASS/WARN/FAIL
                 last_status = last_audit.audit_result
 
         response.append(
@@ -128,11 +126,6 @@ def list_models(db: Session = Depends(get_db)):
 # =========================================================
 
 def _run_audit_background(model_id: str, audit_public_id: str):
-    """
-    ✅ Background-safe audit runner
-    - creates its own DB session
-    - updates the SAME audit_id row
-    """
     db: Session = SessionLocal()
     try:
         logger.info(f"Background audit START model_id={model_id} audit_id={audit_public_id}")
@@ -150,10 +143,6 @@ def _run_audit_background(model_id: str, audit_public_id: str):
         policy = db.query(AuditPolicy).filter(AuditPolicy.model_id == model.id).first()
 
         engine = AuditEngine(db)
-
-        # ✅ IMPORTANT FIX:
-        # do NOT pass unsupported keyword args
-        # pass audit id as positional third param (most stable)
         engine.run_active_audit(model, policy, audit_public_id)
 
         logger.info(f"Background audit END model_id={model_id} audit_id={audit_public_id}")
@@ -184,12 +173,6 @@ def run_model_audit(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
-    """
-    ✅ Enterprise behavior:
-    - Create AuditRun immediately (RUNNING)
-    - Return audit_id immediately
-    - Run async in background
-    """
     model = db.query(AIModel).filter(AIModel.model_id == model_id).first()
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
@@ -246,7 +229,6 @@ def recent_model_audits(model_id: str, db: Session = Depends(get_db)):
         .all()
     )
 
-    # ✅ Enterprise: show RUNNING until completed
     out = []
     for a in audits:
         result = a.audit_result
@@ -285,7 +267,7 @@ def get_audit_interactions(audit_id: str, db: Session = Depends(get_db)):
             "prompt_id": r.prompt_id,
             "prompt": r.prompt,
             "response": r.response,
-            "latency_ms": float(r.latency or 0.0),
+            "latency_ms": float(getattr(r, "latency", 0.0) or 0.0),
             "created_at": r.created_at.isoformat() if r.created_at else None,
         }
         for r in rows
@@ -326,6 +308,12 @@ def get_audit_findings_with_guidance(audit_id: str, db: Session = Depends(get_db
 
 @router.get("/audits/{audit_id}/findings-grouped")
 def get_audit_grouped_findings(audit_id: str, db: Session = Depends(get_db)):
+    """
+    ✅ Enterprise-safe grouped report builder:
+    - Never crashes due to missing metric score fields
+    - Deduplicates findings
+    - Evidence is limited and does NOT dump full interaction history
+    """
     audit = db.query(AuditRun).filter(AuditRun.audit_id == audit_id).first()
     if not audit:
         raise HTTPException(status_code=404, detail="Audit not found")
@@ -349,33 +337,42 @@ def get_audit_grouped_findings(audit_id: str, db: Session = Depends(get_db)):
     metric_rows = (
         db.query(AuditMetricScore)
         .filter(AuditMetricScore.audit_id == audit.id)
-        .order_by(AuditMetricScore.severity_score_100.desc())
+        .order_by(AuditMetricScore.id.desc())
         .all()
     )
 
+    # ✅ Enterprise-safe metric mapping (getattr fallback)
     metric_scores_payload: List[Dict[str, Any]] = []
     for ms in metric_rows:
         metric_scores_payload.append(
             {
-                "metric": ms.metric_name,
-                "L": float(ms.likelihood or 0.0),
-                "I": float(ms.impact or 0.0),
-                "R": float(ms.regulatory_weight or 0.0),
-                "S": float(ms.severity_score or 0.0),
-                "score_100": float(ms.severity_score_100 or 0.0),
-                "band": ms.severity_band or "LOW",
-                "w": float(ms.strategic_weight or 1.0),
-                "frameworks": ms.framework_breakdown or {},
-                "signals": ms.signals or {},
-                "alpha": float(ms.alpha or 1.0),
-                "beta": float(ms.beta or 1.5),
+                "metric": getattr(ms, "metric_name", None),
+
+                # L/I/R/S
+                "L": float(getattr(ms, "likelihood", 0.0) or 0.0),
+                "I": float(getattr(ms, "impact", 0.0) or 0.0),
+                "R": float(getattr(ms, "regulatory_weight", 0.0) or 0.0),
+                "S": float(getattr(ms, "severity_score", 0.0) or 0.0),
+
+                # 0..100
+                "score_100": float(getattr(ms, "severity_score_100", 0.0) or 0.0),
+
+                # band/weights
+                "band": getattr(ms, "severity_band", None) or "LOW",
+                "w": float(getattr(ms, "strategic_weight", 1.0) or 1.0),
+
+                # optional blocks
+                "frameworks": getattr(ms, "framework_breakdown", None) or {},
+                "signals": getattr(ms, "signals", None) or {},
+                "alpha": float(getattr(ms, "alpha", 1.0) or 1.0),
+                "beta": float(getattr(ms, "beta", 1.5) or 1.5),
             }
         )
 
     summary_row = db.query(AuditSummary).filter(AuditSummary.audit_id == audit.id).first()
 
     global_risk = {}
-    if summary_row and summary_row.metrics_snapshot:
+    if summary_row and getattr(summary_row, "metrics_snapshot", None):
         dyn = (summary_row.metrics_snapshot or {}).get("dynamic_scoring") or {}
         global_risk = {
             "score_100": dyn.get("global_score_100"),
@@ -408,13 +405,15 @@ def get_audit_grouped_findings(audit_id: str, db: Session = Depends(get_db)):
             }
         )
 
+    # ✅ DO NOT dump full interactions into the report (enterprise requirement)
+    # Build only a small indexed set for evidence linkage (report_builder will sample max 3 per issue)
     interactions_payload: List[Dict[str, Any]] = [
         {
             "interaction_id": i.id,
             "prompt_id": i.prompt_id,
             "prompt": i.prompt,
             "response": i.response,
-            "latency_ms": float(i.latency or 0.0),
+            "latency_ms": float(getattr(i, "latency", 0.0) or 0.0),
             "created_at": i.created_at.isoformat() if i.created_at else None,
         }
         for i in interactions

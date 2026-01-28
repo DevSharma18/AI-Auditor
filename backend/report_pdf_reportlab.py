@@ -1,3 +1,5 @@
+# backend/report_pdf_reportlab.py
+
 from __future__ import annotations
 
 from io import BytesIO
@@ -21,12 +23,8 @@ def _severity_color(sev: str):
     s = (sev or "").upper().strip()
     if s == "CRITICAL":
         return colors.HexColor("#991b1b")
-    if s == "SEVERE":
-        return colors.HexColor("#9a3412")
     if s == "HIGH":
         return colors.HexColor("#9a3412")
-    if s == "MODERATE":
-        return colors.HexColor("#92400e")
     if s == "MEDIUM":
         return colors.HexColor("#92400e")
     if s == "LOW":
@@ -40,10 +38,9 @@ def generate_audit_pdf_bytes(structured_report: Dict[str, Any]) -> bytes:
     - Executive summary
     - Dynamic scoring (global + metric)
     - Metadata
-    - Grouped findings only
+    - Grouped findings only (deduped)
     - Occurrences count
-    - Limited evidence samples (1–3)
-    No raw dump of all interactions.
+    - Evidence references only (no raw prompt logs)
     """
 
     audit = structured_report.get("audit", {}) or {}
@@ -215,7 +212,7 @@ def generate_audit_pdf_bytes(structured_report: Dict[str, Any]) -> bytes:
     # =========================================
     # GROUPED FINDINGS
     # =========================================
-    story.append(Paragraph("Grouped Findings (Deduplicated)", section_style))
+    story.append(Paragraph("Key Findings (Deduplicated)", section_style))
 
     if not grouped_findings:
         story.append(Paragraph("No findings recorded in this audit.", normal_style))
@@ -261,7 +258,7 @@ def generate_audit_pdf_bytes(structured_report: Dict[str, Any]) -> bytes:
     # =========================================
     # GUIDANCE
     # =========================================
-    story.append(Paragraph("Guidance and Remediation", section_style))
+    story.append(Paragraph("Recommendations", section_style))
 
     if not grouped_findings:
         story.append(Paragraph("No issues to remediate.", normal_style))
@@ -306,35 +303,51 @@ def generate_audit_pdf_bytes(structured_report: Dict[str, Any]) -> bytes:
     story.append(PageBreak())
 
     # =========================================
-    # LIMITED EVIDENCE SAMPLES
+    # EVIDENCE REFERENCES (LIMITED)
     # =========================================
-    story.append(Paragraph("Evidence Samples (Limited)", section_style))
+    story.append(Paragraph("Evidence References (Limited)", section_style))
     story.append(
         Paragraph(
-            "This section includes only a small sample of audit evidence to keep reporting clean and executive-friendly.",
+            "This report includes limited evidence references for traceability. Raw prompt/response logs are intentionally excluded.",
             subtle_style,
         )
     )
     story.append(Spacer(1, 10))
 
     if not evidence_samples:
-        story.append(Paragraph("No evidence samples available.", normal_style))
+        story.append(Paragraph("No evidence references available.", normal_style))
     else:
-        for i in evidence_samples[:3]:
-            story.append(
-                Paragraph(
-                    f"<b>Prompt ID:</b> {i.get('prompt_id','-')} &nbsp;&nbsp; "
-                    f"<b>Latency:</b> {i.get('latency_ms','-')} ms",
-                    subtle_style,
-                )
+        rows = [["Finding ID", "Interaction ID", "Prompt ID", "Timestamp", "Latency (ms)"]]
+        for e in evidence_samples:
+            rows.append(
+                [
+                    str(e.get("finding_id", "-")),
+                    str(e.get("interaction_id", "-")),
+                    str(e.get("prompt_id", "-")),
+                    str(e.get("created_at", "-")),
+                    str(e.get("latency_ms", "-")),
+                ]
             )
-            story.append(Spacer(1, 4))
-            story.append(Paragraph("<b>Prompt:</b>", normal_style))
-            story.append(Paragraph(str(i.get("prompt", "")), normal_style))
-            story.append(Spacer(1, 6))
-            story.append(Paragraph("<b>Response:</b>", normal_style))
-            story.append(Paragraph(str(i.get("response", "")), normal_style))
-            story.append(Spacer(1, 12))
+
+        tbl = Table(rows, colWidths=[3.4 * cm, 3.0 * cm, 3.0 * cm, 5.0 * cm, 2.5 * cm])
+        tbl.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f9fafb")),
+                    ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#e5e7eb")),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE", (0, 0), (-1, 0), 8.5),
+                    ("FONTSIZE", (0, 1), (-1, -1), 8.0),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("TEXTCOLOR", (0, 0), (-1, -1), colors.HexColor("#111827")),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                    ("TOPPADDING", (0, 0), (-1, -1), 5),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ]
+            )
+        )
+        story.append(tbl)
 
     doc.build(story)
 

@@ -117,7 +117,9 @@ class EvidenceSource(Base):
     model_id = Column(Integer, ForeignKey("ai_models.id"), nullable=False)
 
     source_type = Column(String, default="api")
-    config = Column(JSON, default={})
+
+    # ✅ Avoid mutable default {}
+    config = Column(JSON, default=dict)
 
     read_only = Column(Boolean, default=True)
 
@@ -142,7 +144,7 @@ class AuditPolicy(Base):
 
     audit_scope = Column(
         JSON,
-        default={
+        default=lambda: {
             "drift": True,
             "bias": True,
             "risk": True,
@@ -151,7 +153,7 @@ class AuditPolicy(Base):
         },
     )
 
-    policy_reference = Column(JSON, default={})
+    policy_reference = Column(JSON, default=dict)
     active_audit_enabled = Column(Boolean, default=False)
 
     last_run_at = Column(DateTime, nullable=True)
@@ -230,7 +232,7 @@ class AuditSummary(Base):
 
 
 # =========================
-# AUDIT METRIC SCORE (NEW)
+# AUDIT METRIC SCORE
 # =========================
 
 class AuditMetricScore(Base):
@@ -274,10 +276,10 @@ class AuditFinding(Base):
 
     audit_id = Column(Integer, ForeignKey("audit_runs.id"), nullable=False)
 
-    # ✅ Prompt evidence mapping (NEW)
+    # ✅ Prompt evidence mapping
     prompt_id = Column(String, nullable=True, index=True)
 
-    # ✅ Link to AuditInteraction row (NEW)
+    # ✅ Link to AuditInteraction row
     interaction_id = Column(Integer, ForeignKey("audit_interactions.id"), nullable=True, index=True)
 
     category = Column(String, nullable=False)
@@ -291,6 +293,9 @@ class AuditFinding(Base):
     deviation_percentage = Column(Float, default=0.0)
 
     description = Column(String, nullable=True)
+
+    # ✅ LIVE support for breakdowns (PII type, regulations, etc.)
+    extra = Column(JSON, nullable=True)
 
     audit_run = relationship("AuditRun", back_populates="findings")
     interaction = relationship("AuditInteraction", back_populates="findings")

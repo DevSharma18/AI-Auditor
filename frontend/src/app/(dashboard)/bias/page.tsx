@@ -486,7 +486,7 @@ export default function BiasPage() {
       {/* Executive Context */}
       <div style={{ border: '2px solid #e5e7eb', padding: 18, marginBottom: 28 }}>
         <div style={{ fontSize: 16, fontWeight: 900, color: '#111827', marginBottom: 8 }}>
-          What this means (for leadership)
+          What this means
         </div>
 
         <div style={{ fontSize: 13, color: '#6b7280', lineHeight: 1.6 }}>

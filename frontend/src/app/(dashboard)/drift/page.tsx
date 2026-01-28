@@ -236,7 +236,7 @@ export default function DriftPage() {
     const rising =
       last3.length >= 2 &&
       safeNumber(last3[last3.length - 1]?.score_100, 0) >
-        safeNumber(last3[0]?.score_100, 0);
+      safeNumber(last3[0]?.score_100, 0);
 
     return [
       {
@@ -288,7 +288,7 @@ export default function DriftPage() {
     <div style={{ minHeight: '100vh', background: '#ffffff', padding: '0' }}>
       {/* Page Header */}
       <div style={{ marginBottom: '24px' }}>
-        <h1 style={safeTitle}>Drift & Bias Monitoring</h1>
+        <h1 style={safeTitle}>Drift Monitoring</h1>
         <p style={safeSub}>
           Monitor model drift, reliability degradation, and governance risk signals across your AI systems.
         </p>
