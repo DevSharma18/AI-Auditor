@@ -88,7 +88,7 @@ export default function BiasPage() {
 
   const [payload, setPayload] = useState<MetricApiResponse | null>(null);
   
-  // ✅ NEW: Store the exact count of bias prompts
+  // Store exact count of bias prompts
   const [biasPromptCount, setBiasPromptCount] = useState<number>(0);
 
   const [models, setModels] = useState<ModelRow[]>([]);
@@ -121,7 +121,7 @@ export default function BiasPage() {
       setPayload(data);
       setLastUpdatedAt(new Date().toISOString());
 
-      // ✅ FIX: If we have an audit ID, fetch its interactions to count TRUE Bias prompts
+      // Fetch precise interaction count from the specific audit
       const latestAuditId = data?.scoring?.latest?.audit_id;
       if (latestAuditId) {
         fetchAuditDetails(latestAuditId);
@@ -135,27 +135,20 @@ export default function BiasPage() {
     }
   }
 
-  // ✅ Helper: Fetch specific interactions to get accurate "Coverage" count
+  // Helper: Fetch interactions to get accurate "Coverage" count
   async function fetchAuditDetails(auditId: string) {
     try {
-      // Assuming endpoint /api/audits/{id}/interactions exists or similar
-      // If using the grouped report endpoint, we can also extract it. 
-      // Let's use the 'interactions' endpoint if available, or just use the signals if backend supports it.
-      // For now, we will assume we can get the raw list or use a heuristic.
-      
       const interactions = await apiGet<Interaction[]>(`/audits/${auditId}/interactions`);
       if (Array.isArray(interactions)) {
-        // Filter: Count only prompts that start with 'bias_'
+        // Count only prompts starting with 'bias_'
         const biasCount = interactions.filter(i => 
-          (i.prompt_id || '').toLowerCase().startsWith('bias_') || 
-          (i.category || '').toLowerCase().includes('bias')
+          (i.prompt_id || '').toLowerCase().startsWith('bias_')
         ).length;
         
         setBiasPromptCount(biasCount);
       }
     } catch (e) {
       console.warn("Could not fetch precise interaction count", e);
-      // Fallback: If fetch fails, we leave it as 0 or handle gracefully in UI
     }
   }
 
@@ -175,9 +168,8 @@ export default function BiasPage() {
   const findingCount = safeNumberInt(signals.finding_count, 0);
   const freqRatio = safeNumber(signals.frequency_ratio, 0);
 
-  // ✅ Use our calculated count if available, otherwise fallback to signals.interactions (but warn)
+  // Use calculated bias count if available, else fallback
   const displayCount = biasPromptCount > 0 ? biasPromptCount : safeNumberInt(signals.interactions, 0);
-  const countLabel = biasPromptCount > 0 ? "Bias Prompts Scanned" : "Total Audit Interactions";
 
   const trendPoints = useMemo(() => {
     if (!Array.isArray(trend) || trend.length === 0) return [];
@@ -230,19 +222,60 @@ export default function BiasPage() {
     return '#6b7280';
   }, [trendDirection]);
 
-  // STYLES
-  const controlsBox = { border: '2px solid #e5e7eb', padding: '14px 16px', marginBottom: '24px', display: 'flex', gap: '12px', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap' as const };
-  const leftControls = { display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap' as const };
-  const rightControls = { display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' as const };
-  const selectStyle = { border: '2px solid #e5e7eb', padding: '10px 12px', fontSize: '13px', fontWeight: 700, color: '#111827', background: '#ffffff', outline: 'none', minWidth: 260 } as const;
-  const btn = { border: '2px solid #e5e7eb', padding: '10px 12px', fontSize: 13, fontWeight: 900, color: '#111827', background: '#ffffff', cursor: 'pointer' } as const;
-  const statusBadge = (text: string, color: string) => ({ border: `2px solid ${color}`, color, padding: '6px 10px', fontSize: 12, fontWeight: 900, textTransform: 'uppercase' as const, letterSpacing: '0.5px', display: 'inline-block' });
-  const safeTitle: React.CSSProperties = { fontSize: '28px', fontWeight: '700', color: '#1a1a1a', marginBottom: '8px', lineHeight: 1.2, wordBreak: 'break-word' };
-  const safeSub: React.CSSProperties = { fontSize: '14px', color: '#6b7280', lineHeight: 1.5, wordBreak: 'break-word' };
+  // --- UI STATES (Expanded for clarity) ---
 
-  if (loading) return <div style={{ minHeight: '100vh', background: '#ffffff', padding: 0 }}><div style={{ marginBottom: 32 }}><h1 style={safeTitle}>Bias Detection</h1><p style={safeSub}>Loading...</p></div></div>;
-  if (error) return <div style={{ minHeight: '100vh', background: '#ffffff', padding: 0 }}><div style={{ marginBottom: 32 }}><h1 style={safeTitle}>Bias Detection</h1><p style={safeSub}>Error loading metrics.</p></div><div style={controlsBox}><div style={leftControls}><span style={statusBadge('ERROR', '#dc2626')}>ERROR</span></div><div style={rightControls}><button style={btn} onClick={() => loadBias(selectedModelId || undefined)}>Refresh</button></div></div></div>;
-  if (!scoring || scoring.status === 'NO_DATA' || !latest) return <div style={{ minHeight: '100vh', background: '#ffffff', padding: 0 }}><div style={{ marginBottom: 32 }}><h1 style={safeTitle}>Bias Detection</h1><p style={safeSub}>No data found.</p></div><div style={controlsBox}><div style={leftControls}><span style={statusBadge('NO DATA', '#6b7280')}>NO DATA</span></div><div style={rightControls}><button style={btn} onClick={() => loadBias(selectedModelId || undefined)}>Refresh</button></div></div></div>;
+  if (loading) {
+    return (
+      <div style={{ minHeight: '100vh', background: '#ffffff', padding: 0 }}>
+        <div style={{ marginBottom: 32 }}>
+          <h1 style={safeTitle}>Bias Detection</h1>
+          <p style={safeSub}>Loading...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div style={{ minHeight: '100vh', background: '#ffffff', padding: 0 }}>
+        <div style={{ marginBottom: 32 }}>
+          <h1 style={safeTitle}>Bias Detection</h1>
+          <p style={safeSub}>Error loading metrics.</p>
+        </div>
+        <div style={controlsBox}>
+          <div style={leftControls}>
+            <span style={statusBadge('ERROR', '#dc2626')}>ERROR</span>
+          </div>
+          <div style={rightControls}>
+            <button style={btn} onClick={() => loadBias(selectedModelId || undefined)}>Refresh</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!scoring || scoring.status === 'NO_DATA' || !latest) {
+    return (
+      <div style={{ minHeight: '100vh', background: '#ffffff', padding: 0 }}>
+        <div style={{ marginBottom: 32 }}>
+          <h1 style={safeTitle}>Bias Detection</h1>
+          <p style={safeSub}>No data found.</p>
+        </div>
+        <div style={controlsBox}>
+          <div style={leftControls}>
+            <span style={statusBadge('NO DATA', '#6b7280')}>NO DATA</span>
+          </div>
+          <div style={rightControls}>
+            <button style={btn} onClick={() => loadBias(selectedModelId || undefined)}>Refresh</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  /* =========================
+     MAIN UI
+  ========================= */
 
   return (
     <div style={{ minHeight: '100vh', background: '#ffffff', padding: 0 }}>
@@ -271,9 +304,9 @@ export default function BiasPage() {
         <MetricCard title="Risk Band" value={band} color={bandClr} description="Board-level severity label." />
         <MetricCard title="Signals Observed" value={findingCount} color="#111827" description="Total bias findings detected." />
         
-        {/* ✅ CORRECTED DISPLAY */}
+        {/* ✅ CORRECTED LABEL */}
         <MetricCard 
-          title="Coverage" 
+          title="Scanned Interactions" 
           value={`${displayCount} prompts`} 
           color="#3b82f6" 
           description={biasPromptCount > 0 ? "Specific bias-testing prompts." : "Total audit interactions (bias subset unavailable)."} 
@@ -342,13 +375,23 @@ export default function BiasPage() {
   );
 }
 
-function MetricCard({ title, value, color, description }: any) {
-  return <div style={{ background: '#fff', border: '2px solid #e5e7eb', padding: 22 }}><div style={{ fontSize: 13, fontWeight: 900, color: '#6b7280', textTransform: 'uppercase' }}>{title}</div><div style={{ fontSize: 42, fontWeight: 900, color, marginTop: 8 }}>{value}</div><div style={{ fontSize: 12, color: '#6b7280', marginTop: 10 }}>{description}</div></div>;
-}
-function ActionItem({ title, text }: any) { return <div style={{ padding: '10px 0', borderBottom: '1px solid #e5e7eb' }}><div style={{ fontSize: 13, fontWeight: 900, color: '#111827', marginBottom: 4 }}>{title}</div><div style={{ fontSize: 13, color: '#6b7280' }}>{text}</div></div>; }
+// ---------------- STYLES ----------------
 
+const controlsBox = { border: '2px solid #e5e7eb', padding: '14px 16px', marginBottom: '24px', display: 'flex', gap: '12px', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap' as const };
+const leftControls = { display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap' as const };
+const rightControls = { display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' as const };
+const selectStyle = { border: '2px solid #e5e7eb', padding: '10px 12px', fontSize: '13px', fontWeight: 700, color: '#111827', background: '#ffffff', outline: 'none', minWidth: 260 } as const;
+const btn = { border: '2px solid #e5e7eb', padding: '10px 12px', fontSize: 13, fontWeight: 900, color: '#111827', background: '#ffffff', cursor: 'pointer' } as const;
+const statusBadge = (text: string, color: string) => ({ border: `2px solid ${color}`, color, padding: '6px 10px', fontSize: 12, fontWeight: 900, textTransform: 'uppercase' as const, letterSpacing: '0.5px', display: 'inline-block' });
+const safeTitle: React.CSSProperties = { fontSize: '28px', fontWeight: '700', color: '#1a1a1a', marginBottom: '8px', lineHeight: 1.2, wordBreak: 'break-word' };
+const safeSub: React.CSSProperties = { fontSize: '14px', color: '#6b7280', lineHeight: 1.5, wordBreak: 'break-word' };
 const chartBox = { background: '#ffffff', border: '2px solid #e5e7eb', padding: 24, overflow: 'hidden' as const };
 const sectionTitle = { fontSize: '20px', fontWeight: '700', color: '#1a1a1a', marginBottom: '16px', borderBottom: '2px solid #e5e7eb', paddingBottom: '10px' };
 const thStyle = { textAlign: 'left' as const, padding: '12px 16px', fontSize: '12px', fontWeight: 900, color: '#6b7280', textTransform: 'uppercase' as const };
 const tdStrong = { padding: '14px 16px', fontSize: '14px', fontWeight: 800, color: '#111827' };
 const tdMuted = { padding: '14px 16px', fontSize: '13px', color: '#6b7280' };
+
+function MetricCard({ title, value, color, description }: any) {
+  return <div style={{ background: '#fff', border: '2px solid #e5e7eb', padding: 22 }}><div style={{ fontSize: 13, fontWeight: 900, color: '#6b7280', textTransform: 'uppercase' }}>{title}</div><div style={{ fontSize: 42, fontWeight: 900, color, marginTop: 8 }}>{value}</div><div style={{ fontSize: 12, color: '#6b7280', marginTop: 10 }}>{description}</div></div>;
+}
+function ActionItem({ title, text }: any) { return <div style={{ padding: '10px 0', borderBottom: '1px solid #e5e7eb' }}><div style={{ fontSize: 13, fontWeight: 900, color: '#111827', marginBottom: 4 }}>{title}</div><div style={{ fontSize: 13, color: '#6b7280' }}>{text}</div></div>; }
