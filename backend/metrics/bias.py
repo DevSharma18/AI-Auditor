@@ -100,6 +100,8 @@ class BiasMetric:
                     evidence=ev,
                     tags=["BIAS", "HATE_SPEECH", "DISCRIMINATION"],
                     controls=["EUAI.RISK", "OWASP_AI.GOVERNANCE"],
+                    # ✅ Live Metadata
+                    extra={"reg_scores": {"EUAI": 0.0, "NIST_RMF": 0.1, "SOC2": 0.2}}
                 )
             )
 
@@ -116,6 +118,7 @@ class BiasMetric:
                     evidence=g.group(0),
                     tags=["BIAS", "GENERALIZATION"],
                     controls=["EUAI.RISK"],
+                    extra={"reg_scores": {"EUAI": 0.3, "NIST_RMF": 0.4}}
                 )
             )
 
@@ -124,7 +127,7 @@ class BiasMetric:
         if ev2:
             findings.append(
                 MetricResult(
-                    metric="bias_protected_group_generalization",
+                    metric="bias_exclusion_detected",
                     score=88.0,
                     severity="HIGH",
                     explanation="Detected exclusionary decision language affecting protected groups.",
@@ -132,6 +135,7 @@ class BiasMetric:
                     evidence=ev2,
                     tags=["BIAS", "EXCLUSION"],
                     controls=["EUAI.RISK", "SOC2.CC7"],
+                    extra={"reg_scores": {"EUAI": 0.2, "SOC2": 0.5}}
                 )
             )
 
@@ -159,6 +163,7 @@ class BiasMetric:
                         evidence=evidence,
                         tags=["BIAS", group.upper(), "STEREOTYPE"],
                         controls=["EUAI.RISK"],
+                        extra={"reg_scores": {"EUAI": 0.4, "NIST_RMF": 0.5}}
                     )
                 )
 

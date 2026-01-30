@@ -1,269 +1,123 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { apiGet, apiGetBlob } from '@/lib/api-client';
+import { useEffect, useState, useRef } from 'react';
+import { apiGet, apiGetBlob, apiPost } from '@/lib/api-client';
 
 type Interaction = {
-  interaction_id: number;
-  prompt_id: string;
-  prompt: string;
-  response: string;
-  latency_ms: number;
-  created_at?: string | null;
+    prompt_id: string;
+    prompt: string;
+    response: string;
+    latency: number;
+    created_at?: string | null;
 };
 
 export default function AuditDetailPage({ params }: { params: { auditId: string } }) {
-  const auditId = params.auditId;
+    const auditId = params.auditId;
+    const [interactions, setInteractions] = useState<Interaction[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [status, setStatus] = useState<string>('');
+    const [downloading, setDownloading] = useState(false);
+    const pollRef = useRef<any>(null);
 
-  const [interactions, setInteractions] = useState<Interaction[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
+    async function loadData() {
+        try {
+            const data = await apiGet<Interaction[]>(`/audits/${auditId}/interactions`);
+            setInteractions(Array.isArray(data) ? data : []);
+            
+            // Check status for live updates
+            const auditRes = await apiGet<any>(`/audits/${auditId}/findings-grouped`);
+            const currentStatus = auditRes?.audit?.execution_status || '';
+            setStatus(currentStatus);
 
-  const [error, setError] = useState<string | null>(null);
-  const [downloading, setDownloading] = useState<'json' | 'pdf' | null>(null);
-
-  async function loadInteractions(isRefresh = false) {
-    try {
-      setError(null);
-
-      if (isRefresh) setRefreshing(true);
-      else setLoading(true);
-
-      const data = await apiGet<Interaction[]>(`/audits/${auditId}/interactions`);
-      setInteractions(Array.isArray(data) ? data : []);
-    } catch (err: any) {
-      setInteractions([]);
-      setError(err?.message || 'Failed to load audit interactions');
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
+            if (currentStatus === 'RUNNING' || currentStatus === 'PENDING') {
+                if (!pollRef.current) {
+                    pollRef.current = setInterval(loadData, 3000);
+                }
+            } else {
+                if (pollRef.current) clearInterval(pollRef.current);
+            }
+        } catch {
+            if (pollRef.current) clearInterval(pollRef.current);
+        } finally {
+            setLoading(false);
+        }
     }
-  }
 
-  useEffect(() => {
-    loadInteractions(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [auditId]);
+    useEffect(() => {
+        loadData();
+        return () => { if (pollRef.current) clearInterval(pollRef.current); };
+    }, [auditId]);
 
-  async function downloadJson() {
-    try {
-      setDownloading('json');
-
-      const blob = await apiGetBlob(`/audits/${auditId}/download`);
-      const url = window.URL.createObjectURL(blob);
-
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${auditId}.json`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-
-      window.URL.revokeObjectURL(url);
-    } catch (err: any) {
-      alert(`Download failed: ${err?.message || 'Unknown error'}`);
-    } finally {
-      setDownloading(null);
+    async function stopAudit() {
+        try {
+            await apiPost(`/audits/${auditId}/stop`);
+            loadData();
+        } catch { alert('Failed to stop'); }
     }
-  }
 
-  async function downloadPdf() {
-    try {
-      setDownloading('pdf');
-
-      const blob = await apiGetBlob(`/audits/${auditId}/download-pdf`);
-      const url = window.URL.createObjectURL(blob);
-
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${auditId}.pdf`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-
-      window.URL.revokeObjectURL(url);
-    } catch (err: any) {
-      alert(`PDF download failed: ${err?.message || 'Unknown error'}`);
-    } finally {
-      setDownloading(null);
+    async function downloadReport() {
+        try {
+            setDownloading(true);
+            const blob = await apiGetBlob(`/audits/${auditId}/download`);
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url; a.download = `${auditId}.json`;
+            document.body.appendChild(a); a.click(); a.remove();
+        } catch (err: any) { alert(`Download failed: ${err?.message}`); } 
+        finally { setDownloading(false); }
     }
-  }
 
-  return (
-    <div style={{ background: '#fafafa', minHeight: '100vh', padding: 32 }}>
-      <div style={header}>
-        <div>
-          <h1 style={{ fontSize: 26, fontWeight: 800 }}>
-            Audit Details{' '}
-            <span style={{ fontFamily: 'monospace', fontWeight: 700 }}>{auditId}</span>
-          </h1>
-
-          <p style={{ marginTop: 8, color: '#6b7280', fontSize: 14 }}>
-            Prompt/response evidence for this audit run (stored in DB).
-          </p>
-        </div>
-
-        <div style={{ display: 'flex', gap: 10 }}>
-          <button
-            onClick={() => loadInteractions(true)}
-            disabled={loading || refreshing}
-            style={{
-              ...secondaryBtn,
-              opacity: loading || refreshing ? 0.6 : 1,
-              cursor: loading || refreshing ? 'not-allowed' : 'pointer',
-            }}
-          >
-            {refreshing ? 'Refreshing…' : 'Refresh'}
-          </button>
-
-          <button
-            onClick={downloadJson}
-            disabled={downloading !== null}
-            style={{
-              ...primaryBtn,
-              opacity: downloading !== null ? 0.6 : 1,
-              cursor: downloading !== null ? 'not-allowed' : 'pointer',
-            }}
-          >
-            {downloading === 'json' ? 'Downloading…' : 'Download JSON'}
-          </button>
-
-          <button
-            onClick={downloadPdf}
-            disabled={downloading !== null}
-            style={{
-              ...primaryBtn,
-              opacity: downloading !== null ? 0.6 : 1,
-              cursor: downloading !== null ? 'not-allowed' : 'pointer',
-            }}
-          >
-            {downloading === 'pdf' ? 'Downloading…' : 'Download PDF'}
-          </button>
-        </div>
-      </div>
-
-      {loading ? (
-        <div style={emptyBox}>Loading audit evidence…</div>
-      ) : error ? (
-        <div style={emptyBox}>
-          <div style={{ fontWeight: 800, color: '#b91c1c', marginBottom: 8 }}>
-            Failed to load interactions
-          </div>
-          <div style={{ color: '#6b7280', fontSize: 13 }}>{error}</div>
-        </div>
-      ) : interactions.length === 0 ? (
-        <div style={emptyBox}>No interactions found for this audit.</div>
-      ) : (
-        <div style={{ marginTop: 18 }}>
-          <div style={{ marginBottom: 14, fontSize: 14, color: '#374151' }}>
-            Showing <strong>{interactions.length}</strong> stored interactions
-          </div>
-
-          {interactions.map((item) => (
-            <div key={item.interaction_id} style={interactionCard}>
-              <div style={metaRow}>
+    return (
+        <div style={{ background: '#fafafa', minHeight: '100vh', padding: 32 }}>
+            <div style={header}>
                 <div>
-                  Prompt ID:{' '}
-                  <span style={{ fontFamily: 'monospace', fontWeight: 700 }}>{item.prompt_id}</span>
+                    <h1 style={{ fontSize: 26, fontWeight: 800 }}>
+                        Audit Details <span style={{ fontFamily: 'monospace' }}>{auditId}</span>
+                    </h1>
+                    <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <span style={{ fontSize: 14, color: '#6b7280' }}>Status: <strong>{status}</strong></span>
+                        {(status === 'RUNNING' || status === 'PENDING') && (
+                            <button onClick={stopAudit} style={{ background: '#dc2626', color: '#fff', border: 'none', padding: '4px 8px', borderRadius: 4, cursor: 'pointer', fontSize: 12, fontWeight: 700 }}>
+                                Stop Audit
+                            </button>
+                        )}
+                    </div>
                 </div>
-
-                <div style={{ color: '#6b7280' }}>
-                  Latency:{' '}
-                  <span style={{ fontWeight: 700, color: '#111827' }}>
-                    {item.latency_ms} ms
-                  </span>
+                <div style={{ display: 'flex', gap: 10 }}>
+                    <button onClick={downloadReport} disabled={downloading || status === 'RUNNING'} style={{ ...primaryBtn, opacity: (downloading || status === 'RUNNING') ? 0.6 : 1 }}>
+                        {downloading ? 'Downloading…' : 'Download JSON Report'}
+                    </button>
                 </div>
-              </div>
-
-              <div style={{ marginTop: 14 }}>
-                <div style={blockTitle}>Prompt</div>
-                <pre style={boxStyle}>{item.prompt}</pre>
-              </div>
-
-              <div style={{ marginTop: 14 }}>
-                <div style={blockTitle}>Response</div>
-                <pre style={boxStyle}>{item.response}</pre>
-              </div>
             </div>
-          ))}
+
+            {loading ? <div style={emptyBox}>Loading evidence…</div> : (
+                <div style={{ marginTop: 18 }}>
+                    {interactions.map((item, index) => (
+                        <div key={index} style={interactionCard}>
+                            <div style={metaRow}>
+                                <div>Prompt ID: <span style={{ fontWeight: 700 }}>{item.prompt_id}</span></div>
+                                <div>Latency: <strong>{item.latency} ms</strong></div>
+                            </div>
+                            <div style={{ marginTop: 14 }}>
+                                <div style={blockTitle}>Prompt</div>
+                                <pre style={boxStyle}>{item.prompt}</pre>
+                            </div>
+                            <div style={{ marginTop: 14 }}>
+                                <div style={blockTitle}>Response</div>
+                                <pre style={boxStyle}>{item.response}</pre>
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            )}
         </div>
-      )}
-    </div>
-  );
+    );
 }
 
-/* =========================
-   STYLES
-========================= */
-
-const header = {
-  display: 'flex',
-  justifyContent: 'space-between',
-  alignItems: 'flex-start',
-  gap: 16,
-  paddingBottom: 18,
-  borderBottom: '2px solid #e5e7eb',
-};
-
-const primaryBtn = {
-  padding: '12px 16px',
-  background: '#111827',
-  color: '#ffffff',
-  border: 'none',
-  fontSize: 14,
-  fontWeight: 800,
-  borderRadius: 8,
-};
-
-const secondaryBtn = {
-  padding: '12px 16px',
-  background: '#ffffff',
-  color: '#111827',
-  border: '1px solid #e5e7eb',
-  fontSize: 14,
-  fontWeight: 800,
-  borderRadius: 8,
-};
-
-const emptyBox = {
-  marginTop: 20,
-  background: '#ffffff',
-  border: '1px solid #e5e7eb',
-  padding: 40,
-  textAlign: 'center' as const,
-  color: '#666666',
-  borderRadius: 10,
-};
-
-const interactionCard = {
-  background: '#ffffff',
-  border: '1px solid #e5e7eb',
-  borderRadius: 12,
-  padding: 18,
-  marginBottom: 16,
-};
-
-const metaRow = {
-  display: 'flex',
-  justifyContent: 'space-between',
-  alignItems: 'center',
-  fontSize: 12,
-  color: '#111827',
-};
-
-const blockTitle = {
-  fontSize: 13,
-  fontWeight: 800,
-  color: '#111827',
-  marginBottom: 8,
-};
-
-const boxStyle = {
-  background: '#f9fafb',
-  border: '1px solid #e5e7eb',
-  padding: 12,
-  borderRadius: 8,
-  whiteSpace: 'pre-wrap' as const,
-  fontSize: 13,
-  lineHeight: 1.5,
-};
+const header = { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', paddingBottom: 18, borderBottom: '2px solid #e5e7eb' };
+const primaryBtn = { padding: '12px 16px', background: '#111827', color: '#fff', border: 'none', fontSize: 14, fontWeight: 800, borderRadius: 8, cursor: 'pointer' };
+const emptyBox = { marginTop: 20, background: '#fff', border: '1px solid #e5e7eb', padding: 40, textAlign: 'center' as const, borderRadius: 10 };
+const interactionCard = { background: '#fff', border: '1px solid #e5e7eb', borderRadius: 12, padding: 18, marginBottom: 16 };
+const metaRow = { display: 'flex', justifyContent: 'space-between', fontSize: 12 };
+const blockTitle = { fontSize: 13, fontWeight: 800, marginBottom: 8 };
+const boxStyle = { background: '#f9fafb', border: '1px solid #e5e7eb', padding: 12, borderRadius: 8, whiteSpace: 'pre-wrap' as const, fontSize: 13, lineHeight: 1.5 };

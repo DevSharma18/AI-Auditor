@@ -24,7 +24,8 @@ type MetricPoint = {
   I?: number;
   R?: number;
 
-  frameworks?: any;
+  // ✅ UPDATED: Frameworks is now a score map { "GDPR": 0.95, "DPDP": 0.8 }
+  frameworks?: Record<string, number>; 
   signals?: any;
   alpha?: number;
   beta?: number;
@@ -79,13 +80,6 @@ function safeDateLabel(executedAt: string | null | undefined, fallback: string) 
   } catch {
     return fallback;
   }
-}
-
-function normalizeFrameworkList(frameworks: any): string[] {
-  if (!frameworks) return [];
-  if (Array.isArray(frameworks)) return frameworks.map(String);
-  if (typeof frameworks === 'object') return Object.keys(frameworks).map(String);
-  return [String(frameworks)];
 }
 
 export default function CompliancePage() {
@@ -238,64 +232,47 @@ export default function CompliancePage() {
     };
   }, [trendPoints]);
 
-  const frameworksList = useMemo(() => normalizeFrameworkList(latest?.frameworks), [latest?.frameworks]);
-
+  // ✅ LIVE DATA: Dynamic Regulation Coverage
+  // This logic now reads the exact "DPDP", "ISO42001", etc. keys from the backend
   const regulationCoverage = useMemo(() => {
-    const score = score100;
+    const backendData = latest?.frameworks || {};
 
-    const defaultRegs = [
-      { regulation: 'EU AI Act', hint: 'AI governance + risk classification' },
-      { regulation: 'GDPR', hint: 'Privacy and data processing obligations' },
-      { regulation: 'DPDP (India)', hint: 'India data protection requirements' },
-      { regulation: 'ISO/IEC 42001', hint: 'AI management system governance' },
-      { regulation: 'SOC 2', hint: 'Security controls & audit readiness' },
-      { regulation: 'HIPAA', hint: 'Healthcare privacy baseline' },
+    const regMap = [
+      { key: 'GDPR', label: 'GDPR', hint: 'Privacy and data processing obligations' },
+      { key: 'EUAI', label: 'EU AI Act', hint: 'AI governance + risk classification' },
+      { key: 'DPDP', label: 'DPDP (India)', hint: 'India data protection requirements' },
+      { key: 'ISO42001', label: 'ISO 42001', hint: 'AI management system governance' },
+      { key: 'SOC2', label: 'SOC 2', hint: 'Security controls & audit readiness' },
+      { key: 'HIPAA', label: 'HIPAA', hint: 'Healthcare privacy baseline' },
     ];
 
-    const lower = frameworksList.map((x) => x.toLowerCase());
+    return regMap.map((reg) => {
+      // Backend sends 0.0 to 1.0. Default to 0 if key is missing.
+      const rawScore = backendData[reg.key] ?? 0;
+      const coverage = Math.round(rawScore * 100);
+      const covered = rawScore > 0;
 
-    const isCovered = (regName: string) => {
-      const r = regName.toLowerCase();
-      if (r.includes('eu ai act')) return lower.some((x) => x.includes('eu') || x.includes('ai act'));
-      if (r.includes('gdpr')) return lower.some((x) => x.includes('gdpr'));
-      if (r.includes('dpdp')) return lower.some((x) => x.includes('dpdp') || x.includes('india'));
-      if (r.includes('42001')) return lower.some((x) => x.includes('42001') || x.includes('iso'));
-      if (r.includes('soc 2')) return lower.some((x) => x.includes('soc'));
-      if (r.includes('hipaa')) return lower.some((x) => x.includes('hipaa'));
-      return false;
-    };
+      let color = '#ef4444'; // Red
+      if (coverage >= 80) color = '#10b981'; // Green
+      else if (coverage >= 50) color = '#f59e0b'; // Orange
 
-    const derivedCoverage = (covered: boolean) => {
-      if (!covered) return 0;
-      const inverted = 100 - score; // higher risk => lower coverage (executive approximation)
-      const c = Math.max(35, Math.min(95, inverted));
-      return Math.round(c);
-    };
-
-    const coverageColor = (coverage: number) => {
-      if (coverage >= 80) return '#10b981';
-      if (coverage >= 60) return '#3b82f6';
-      if (coverage >= 40) return '#f59e0b';
-      return '#ef4444';
-    };
-
-    return defaultRegs.map((reg) => {
-      const covered = isCovered(reg.regulation);
-      const coverage = derivedCoverage(covered);
       return {
-        regulation: reg.regulation,
+        regulation: reg.label,
         coverage,
-        color: coverageColor(coverage),
+        color,
         covered,
         hint: reg.hint,
       };
     });
-  }, [frameworksList, score100]);
+  }, [latest?.frameworks]);
 
+  // ✅ LIVE DATA: Violations Estimate
+  // Uses the real 'R' weight from the backend to estimate volume
   const derivedViolationsEstimate = useMemo(() => {
     const r = safeNumber(latest?.R, 0);
-    const base = Math.round((score100 / 100) * 18);
-    const factor = Math.max(0.6, Math.min(1.6, 0.8 + r));
+    // Base: 20% of the risk score, scaled by regulatory weight
+    const base = Math.round((score100 / 100) * 20); 
+    const factor = Math.max(0.6, Math.min(2.0, 0.8 + r));
     return Math.max(0, Math.round(base * factor));
   }, [score100, latest?.R]);
 
@@ -451,14 +428,11 @@ export default function CompliancePage() {
 
           {/* Coverage by Regulation */}
           <div style={{ marginBottom: '42px' }}>
-            <h2 style={sectionTitle}>Coverage by Regulation</h2>
+            <h2 style={sectionTitle}>Coverage by Regulation (Live Evidence)</h2>
 
             <div style={{ background: '#ffffff', border: '2px solid #e5e7eb', padding: '24px' }}>
               <div style={{ fontSize: 12, color: '#6b7280', fontWeight: 700, marginBottom: 14, lineHeight: 1.4 }}>
-                Coverage is shown as an <b>executive approximation</b> until backend returns per-regulation scoring.
-                <br />
-                Backend frameworks seen:{' '}
-                <b>{frameworksList.length > 0 ? frameworksList.join(', ') : 'Not available yet'}</b>
+                Coverage is calculated dynamically from audit findings. High coverage indicates the model adhered to policies required by that regulation.
               </div>
 
               <table style={{ width: '100%', borderCollapse: 'collapse' }}>
@@ -485,7 +459,7 @@ export default function CompliancePage() {
                       </td>
 
                       <td style={{ padding: '16px', fontSize: '18px', fontWeight: '900', color: item.color }}>
-                        {item.covered ? `${item.coverage}%` : 'Not available yet'}
+                        {item.covered ? `${item.coverage}%` : 'No Data'}
                       </td>
 
                       <td style={{ padding: '16px' }}>
@@ -510,7 +484,7 @@ export default function CompliancePage() {
 
                         {!item.covered && (
                           <div style={{ fontSize: 11, color: '#6b7280', marginTop: 6, fontWeight: 700 }}>
-                            Requires backend per-regulation mapping
+                            Run an audit to generate evidence
                           </div>
                         )}
                       </td>

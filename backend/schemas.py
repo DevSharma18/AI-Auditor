@@ -1,12 +1,8 @@
 from __future__ import annotations
-
+from typing import Optional, Dict, Any
 from datetime import datetime
 from enum import Enum
-from typing import Optional, Dict, Any
-
-from pydantic import BaseModel
-from pydantic.config import ConfigDict
-
+from pydantic import BaseModel, ConfigDict
 
 # =========================
 # ENUMS
@@ -16,7 +12,6 @@ class ExecutionStatus(str, Enum):
     SUCCESS = "SUCCESS"
     PARTIAL = "PARTIAL"
     FAILED = "FAILED"
-
 
 class AuditResultEnum(str, Enum):
     AUDIT_PASS = "AUDIT_PASS"
@@ -30,9 +25,6 @@ class AuditResultEnum(str, Enum):
 # =========================
 
 class RegisterModelRequest(BaseModel):
-    # ✅ Fix Pydantic protected namespace warning
-    model_config = ConfigDict(protected_namespaces=())
-
     model_id: str
     name: str
 
@@ -41,20 +33,19 @@ class RegisterModelRequest(BaseModel):
 
     headers: Dict[str, str]
 
-    # PROVIDER-SPECIFIC FULL PAYLOAD TEMPLATE (must contain {{PROMPT}})
+    # 🔑 PROVIDER-SPECIFIC FULL PAYLOAD TEMPLATE
     request_template: Dict[str, Any]
 
-    # RESPONSE EXTRACTION PATH
+    # 🔑 RESPONSE EXTRACTION PATH
     response_path: str
+    
+    description: Optional[str] = None
+
+    # ✅ SILENCE WARNING: Allow fields starting with "model_"
+    model_config = ConfigDict(protected_namespaces=())
 
 
 class ModelResponse(BaseModel):
-    # ✅ Fix Pydantic protected namespace warning
-    model_config = ConfigDict(
-        protected_namespaces=(),
-        from_attributes=True
-    )
-
     id: int
     model_id: str
     name: str
@@ -62,24 +53,23 @@ class ModelResponse(BaseModel):
     model_type: str
     connection_type: str
     created_at: datetime
-
     last_audit_status: Optional[str] = None
     last_audit_time: Optional[datetime] = None
     audit_frequency: Optional[str] = None
 
+    # ✅ SILENCE WARNING + ORM MODE
+    model_config = ConfigDict(from_attributes=True, protected_namespaces=())
+
 
 class AuditResponse(BaseModel):
-    # ✅ Fix Pydantic protected namespace warning
-    model_config = ConfigDict(protected_namespaces=())
-
     id: int
     audit_id: str
-
-    # internal numeric FK stored in your DB
     model_id: int
-
     audit_type: str
     executed_at: datetime
     execution_status: str
     audit_result: str
     findings_count: int
+
+    # ✅ SILENCE WARNING + ORM MODE
+    model_config = ConfigDict(from_attributes=True, protected_namespaces=())

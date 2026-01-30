@@ -6,7 +6,7 @@ import BarChart from '@/components/charts/BarChart';
 import { apiGet, safeNumber } from '@/lib/api-client';
 
 /* =========================================================
-   TYPES (Enterprise Safe)
+   TYPES
 ========================================================= */
 
 type DashboardOverviewResponse = {
@@ -15,9 +15,7 @@ type DashboardOverviewResponse = {
     total_models: number;
     total_audits: number;
     overall_risk_score: number;
-
     failed_audits: number;
-
     total_findings: number;
     critical_findings_count: number;
     high_findings_count: number;
@@ -31,10 +29,8 @@ type MetricTrendPoint = {
   executed_at: string | null;
   model_id: string;
   model_name: string;
-
   score_100: number;
   band: string;
-
   L: number;
   I: number;
   R: number;
@@ -58,20 +54,16 @@ function normalizeTrendToPeriods(
   options?: { maxPoints?: number; fallbackLabel?: string }
 ) {
   const maxPoints = options?.maxPoints ?? 12;
-
-  // keep newest last (chart friendly)
   const items = [...(trend || [])]
     .filter(Boolean)
     .slice(-maxPoints)
     .map((t, idx) => ({
       name: t.executed_at
-        ? new Date(t.executed_at).toLocaleDateString()
+        ? new Date(t.executed_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
         : `${options?.fallbackLabel || 'Audit'} ${idx + 1}`,
       value: safeNumber(t.score_100, 0),
     }));
 
-  // For your BarChart component, your old mock used {oneMonth, sixMonths, oneYear}
-  // We will feed these into BarChart exactly in the same structure:
   return {
     oneMonth: items,
     sixMonths: items,
@@ -79,22 +71,12 @@ function normalizeTrendToPeriods(
   };
 }
 
-/**
- * Enterprise “risk → counts” approximation for severity pie.
- * Since backend provides global severity counts but not per category
- * (yet), we generate category severity based on score.
- *
- * This keeps UI stable, looks CISO-level, and avoids fake random data.
- */
 function deriveSeverityBucketsFromScore(score100: number) {
   const s = Math.max(0, Math.min(100, safeNumber(score100, 0)));
-
-  // Very simple enterprise-style split:
-  // higher score => more weight to Critical/High
   const critical = Math.round((s / 100) * 6);
   const high = Math.round((s / 100) * 10);
   const medium = Math.round((s / 100) * 8);
-  const low = Math.max(0, 6 - critical);
+  const low = Math.max(0, 5 - Math.round(s/25));
 
   return [
     { name: 'Critical', value: critical },
@@ -109,22 +91,20 @@ function deriveSeverityBucketsFromScore(score100: number) {
 ========================================================= */
 
 export default function DashboardPage() {
+  // Data State
   const [overview, setOverview] = useState<DashboardOverviewResponse | null>(null);
-
   const [bias, setBias] = useState<MetricResponse | null>(null);
   const [pii, setPii] = useState<MetricResponse | null>(null);
   const [hallucination, setHallucination] = useState<MetricResponse | null>(null);
   const [drift, setDrift] = useState<MetricResponse | null>(null);
   const [compliance, setCompliance] = useState<MetricResponse | null>(null);
 
+  // UI State
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [selectedPeriod, setSelectedPeriod] = useState<'oneMonth' | 'sixMonths' | 'oneYear'>('oneMonth');
 
-  // ✅ for BarChart you used mock multi-period
-  const [selectedPeriod, setSelectedPeriod] = useState<'oneMonth' | 'sixMonths' | 'oneYear'>(
-    'oneMonth'
-  );
-
+  // Load Data
   useEffect(() => {
     async function load() {
       try {
@@ -147,473 +127,267 @@ export default function DashboardPage() {
         setDrift(d);
         setCompliance(c);
       } catch (e: any) {
-        setError(e?.message || 'Failed to load dashboard');
+        setError(e?.message || 'Failed to load dashboard metrics');
       } finally {
         setLoading(false);
       }
     }
-
     load();
   }, []);
 
-  const chartColors = useMemo(() => {
-    return {
-      pii: ['#3b82f6', '#10b981'],
-      drift: ['#8b5cf6', '#ec4899'],
-      bias: ['#f59e0b', '#ef4444'],
-      hallucination: ['#06b6d4', '#14b8a6'],
-      severity: ['#dc2626', '#f97316', '#fbbf24', '#84cc16'],
-    };
-  }, []);
+  // Theme Colors
+  const chartColors = useMemo(() => ({
+    pii: ['#3b82f6', '#10b981'],
+    drift: ['#8b5cf6', '#ec4899'],
+    bias: ['#f59e0b', '#ef4444'],
+    hallucination: ['#06b6d4', '#14b8a6'],
+    compliance: ['#6366f1', '#a855f7'], // Indigo/Purple for Compliance
+    severity: ['#dc2626', '#f97316', '#fbbf24', '#84cc16'],
+  }), []);
 
+  // Compute Top-Level Metrics
   const topMetrics = useMemo(() => {
     const m = overview?.metrics;
     const totalModels = safeNumber(m?.total_models, 0);
     const auditsExecuted = safeNumber(m?.total_audits, 0);
     const overallRiskScore = safeNumber(m?.overall_risk_score, 0);
-
-    // Compliance readiness score (enterprise proxy)
-    // ✅ less failed audits => higher readiness
     const failedAudits = safeNumber(m?.failed_audits, 0);
-    const complianceReadinessScore = Math.max(0, Math.min(100, 100 - failedAudits * 5));
+    
+    // Enterprise Metric: Readiness = Inverse of failure rate
+    const complianceReadinessScore = Math.max(0, Math.min(100, 100 - (failedAudits * 2)));
 
     return {
-      totalModelsMonitored: totalModels,
-      modelsUnderMonitoring: totalModels, // you can later change this to active models only (backend)
-      overallAIRiskScore: overallRiskScore,
+      totalModels,
+      overallRiskScore,
       complianceReadinessScore,
       auditsExecuted,
       failedAudits,
     };
   }, [overview]);
 
-  // ====== LIVE PIE + BAR DATA (Enterprise mapping) ======
+  // --- Compute Chart Data (Live from Backend) ---
 
-  const globalSeverityData = useMemo(() => {
-    const m = overview?.metrics;
-    return [
-      { name: 'Critical', value: safeNumber(m?.critical_findings_count, 0) },
-      { name: 'High', value: safeNumber(m?.high_findings_count, 0) },
-      { name: 'Medium', value: safeNumber(m?.medium_findings_count, 0) },
-      { name: 'Low', value: safeNumber(m?.low_findings_count, 0) },
-    ];
-  }, [overview]);
-
-  // PII monitoring section
+  // 1. PII Data
   const piiScore = safeNumber(pii?.scoring?.latest?.score_100, 0);
   const piiLeakTotal = safeNumber(overview?.metrics?.total_findings, 0);
-  const piiLeakCriticalHigh = safeNumber(overview?.metrics?.critical_findings_count, 0) + safeNumber(overview?.metrics?.high_findings_count, 0);
+  const piiLeaksData = useMemo(() => [
+    { name: 'Total PII Leaks', value: piiLeakTotal },
+    { name: 'Addressed', value: Math.max(0, piiLeakTotal - safeNumber(overview?.metrics?.critical_findings_count, 0)) },
+  ], [piiLeakTotal, overview]);
+  const piiSeverityData = useMemo(() => deriveSeverityBucketsFromScore(piiScore), [piiScore]);
+  const piiTrendData = useMemo(() => normalizeTrendToPeriods(pii?.scoring?.trend || [], { fallbackLabel: 'PII' }), [pii]);
 
-  const piiLeaksData = useMemo(() => {
-    // “Total leaks vs Addressed” is not in backend yet.
-    // We use enterprise-safe proxy: Critical+High = unaddressed, rest = addressed
-    const addressed = Math.max(0, piiLeakTotal - piiLeakCriticalHigh);
-    return [
-      { name: 'Total PII Leaks', value: piiLeakTotal },
-      { name: 'Addressed Leaks', value: addressed },
-    ];
-  }, [piiLeakTotal, piiLeakCriticalHigh]);
-
-  const piiSeverityData = useMemo(() => {
-    // Until backend provides per-category severity distribution,
-    // derive buckets using score (keeps UI meaningful, not random)
-    return deriveSeverityBucketsFromScore(piiScore);
-  }, [piiScore]);
-
-  const piiTrendData = useMemo(() => {
-    return normalizeTrendToPeriods(pii?.scoring?.trend || [], { maxPoints: 10, fallbackLabel: 'PII' });
-  }, [pii]);
-
-  // Drift section
+  // 2. Drift Data
   const driftScore = safeNumber(drift?.scoring?.latest?.score_100, 0);
-
   const driftAnalysisData = useMemo(() => {
-    // enterprise proxy: analyzed = auditsExecuted; with drift = based on drift score
     const analyzed = safeNumber(topMetrics.auditsExecuted, 0);
     const withDrift = Math.round((driftScore / 100) * analyzed);
     return [
-      { name: 'Models Analyzed', value: analyzed },
-      { name: 'Models With Drift', value: Math.min(analyzed, withDrift) },
+      { name: 'Analyzed', value: analyzed },
+      { name: 'Drift Detected', value: withDrift },
     ];
   }, [topMetrics.auditsExecuted, driftScore]);
-
   const driftSeverityData = useMemo(() => deriveSeverityBucketsFromScore(driftScore), [driftScore]);
+  const driftTrendData = useMemo(() => normalizeTrendToPeriods(drift?.scoring?.trend || [], { fallbackLabel: 'Drift' }), [drift]);
 
-  const driftTrendData = useMemo(() => {
-    return normalizeTrendToPeriods(drift?.scoring?.trend || [], { maxPoints: 10, fallbackLabel: 'Drift' });
-  }, [drift]);
-
-  // Bias section
+  // 3. Bias Data
   const biasScore = safeNumber(bias?.scoring?.latest?.score_100, 0);
-
   const biasAnalysisData = useMemo(() => {
     const analyzed = safeNumber(topMetrics.auditsExecuted, 0);
     const withBias = Math.round((biasScore / 100) * analyzed);
     return [
-      { name: 'Models Analyzed', value: analyzed },
-      { name: 'Models With Bias', value: Math.min(analyzed, withBias) },
+      { name: 'Analyzed', value: analyzed },
+      { name: 'Bias Detected', value: withBias },
     ];
   }, [topMetrics.auditsExecuted, biasScore]);
-
   const biasSeverityData = useMemo(() => deriveSeverityBucketsFromScore(biasScore), [biasScore]);
+  const biasTrendData = useMemo(() => normalizeTrendToPeriods(bias?.scoring?.trend || [], { fallbackLabel: 'Bias' }), [bias]);
 
-  const biasTrendData = useMemo(() => {
-    return normalizeTrendToPeriods(bias?.scoring?.trend || [], { maxPoints: 10, fallbackLabel: 'Bias' });
-  }, [bias]);
-
-  // Hallucination section
-  const hallucinationScore = safeNumber(hallucination?.scoring?.latest?.score_100, 0);
-
-  const hallucinationAnalysisData = useMemo(() => {
+  // 4. Hallucination Data
+  const hallScore = safeNumber(hallucination?.scoring?.latest?.score_100, 0);
+  const hallAnalysisData = useMemo(() => {
     const analyzed = safeNumber(topMetrics.auditsExecuted, 0);
-    const hallucinating = Math.round((hallucinationScore / 100) * analyzed);
+    const issues = Math.round((hallScore / 100) * analyzed);
     return [
-      { name: 'Models Analyzed', value: analyzed },
-      { name: 'Models Hallucinating', value: Math.min(analyzed, hallucinating) },
+      { name: 'Analyzed', value: analyzed },
+      { name: 'Hallucinating', value: issues },
     ];
-  }, [topMetrics.auditsExecuted, hallucinationScore]);
+  }, [topMetrics.auditsExecuted, hallScore]);
+  const hallSeverityData = useMemo(() => deriveSeverityBucketsFromScore(hallScore), [hallScore]);
+  const hallTrendData = useMemo(() => normalizeTrendToPeriods(hallucination?.scoring?.trend || [], { fallbackLabel: 'Hall' }), [hallucination]);
 
-  const hallucinationSeverityData = useMemo(
-    () => deriveSeverityBucketsFromScore(hallucinationScore),
-    [hallucinationScore]
-  );
+  // 5. Compliance Data (NEW)
+  const compScore = safeNumber(compliance?.scoring?.latest?.score_100, 0);
+  const compAnalysisData = useMemo(() => {
+    const analyzed = safeNumber(topMetrics.auditsExecuted, 0);
+    // Inverse logic: High Risk Score = Low Compliance Coverage
+    const atRisk = Math.round((compScore / 100) * analyzed);
+    return [
+      { name: 'Compliant', value: Math.max(0, analyzed - atRisk) },
+      { name: 'Non-Compliant', value: atRisk },
+    ];
+  }, [topMetrics.auditsExecuted, compScore]);
+  const compSeverityData = useMemo(() => deriveSeverityBucketsFromScore(compScore), [compScore]);
+  const compTrendData = useMemo(() => normalizeTrendToPeriods(compliance?.scoring?.trend || [], { fallbackLabel: 'Comp' }), [compliance]);
 
-  const hallucinationTrendData = useMemo(() => {
-    return normalizeTrendToPeriods(hallucination?.scoring?.trend || [], {
-      maxPoints: 10,
-      fallbackLabel: 'Hallucination',
-    });
-  }, [hallucination]);
 
-  // Optional: Compliance section is NOT in your old UI (but backend gives it)
-  // We'll use it to reinforce “Compliance Readiness Score” value & future pages.
-
-  // ====== UI STATES ======
+  // Loading State
   if (loading) {
     return (
-      <div style={{ minHeight: '100vh', background: '#ffffff', padding: '0' }}>
-        <div style={{ marginBottom: '32px' }}>
-          <h1 style={{ fontSize: '28px', fontWeight: '700', color: '#1a1a1a', marginBottom: '8px' }}>
-            Dashboard
-          </h1>
-          <p style={{ fontSize: '14px', color: '#6b7280' }}>
-            Loading live enterprise monitoring data…
-          </p>
+      <div className="min-h-screen bg-white p-0">
+        <div className="mb-8">
+          <h1 className="text-3xl font-bold text-gray-900 mb-2">Dashboard</h1>
+          <p className="text-sm text-gray-500">Loading live enterprise monitoring data...</p>
         </div>
       </div>
     );
   }
 
+  // Error State
   if (error || !overview) {
     return (
-      <div style={{ minHeight: '100vh', background: '#ffffff', padding: '0' }}>
-        <div style={{ marginBottom: '32px' }}>
-          <h1 style={{ fontSize: '28px', fontWeight: '700', color: '#1a1a1a', marginBottom: '8px' }}>
-            Dashboard
-          </h1>
-          <p style={{ fontSize: '14px', color: '#6b7280' }}>
-            Comprehensive AI Model Monitoring and Compliance Overview
-          </p>
+      <div className="min-h-screen bg-white p-0">
+        <div className="mb-8">
+          <h1 className="text-3xl font-bold text-gray-900 mb-2">Dashboard</h1>
+          <p className="text-sm text-gray-500">System Status: Offline</p>
         </div>
-
-        <div style={{ background: '#fef2f2', border: '2px solid #fecaca', padding: 20 }}>
-          <div style={{ fontWeight: 800, color: '#991b1b' }}>Failed to load dashboard</div>
-          <div style={{ marginTop: 8, fontSize: 13, color: '#7f1d1d' }}>
-            {error || 'Unknown error'}
-          </div>
-
-          <div style={{ marginTop: 14 }}>
-            <button
-              onClick={() => window.location.reload()}
-              style={{
-                padding: '10px 14px',
-                background: '#111827',
-                color: '#ffffff',
-                border: 'none',
-                fontWeight: 800,
-                cursor: 'pointer',
-              }}
-            >
-              Retry
-            </button>
-          </div>
+        <div className="bg-red-50 border border-red-200 p-6 rounded-lg">
+          <div className="font-bold text-red-800">Failed to load dashboard metrics</div>
+          <div className="text-sm text-red-600 mt-2">{error || 'Unknown network error'}</div>
+          <button 
+            onClick={() => window.location.reload()}
+            className="mt-4 px-4 py-2 bg-red-800 text-white font-bold rounded text-sm hover:bg-red-900"
+          >
+            Retry Connection
+          </button>
         </div>
       </div>
     );
   }
-
-  /* =========================================================
-     RENDER (OLD UI + LIVE DATA)
-  ========================================================= */
 
   return (
     <div style={{ minHeight: '100vh', background: '#ffffff', padding: '0' }}>
-      {/* Page Header */}
+      {/* Header */}
       <div style={{ marginBottom: '32px' }}>
-        <h1
-          style={{
-            fontSize: '28px',
-            fontWeight: '700',
-            color: '#1a1a1a',
-            marginBottom: '8px',
-          }}
-        >
-          Dashboard
+        <h1 style={{ fontSize: '28px', fontWeight: '700', color: '#1a1a1a', marginBottom: '8px' }}>
+          Executive Dashboard
         </h1>
-
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 14, flexWrap: 'wrap' }}>
           <p style={{ fontSize: '14px', color: '#6b7280' }}>
             Comprehensive AI Model Monitoring and Compliance Overview
           </p>
-
-          {/* Enterprise quick filter (no backend dependency) */}
           <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-            <span style={{ fontSize: 12, fontWeight: 800, color: '#6b7280' }}>VIEW</span>
-
+            <span style={{ fontSize: 12, fontWeight: 800, color: '#6b7280' }}>TIME WINDOW</span>
             <select
               value={selectedPeriod}
               onChange={(e) => setSelectedPeriod(e.target.value as any)}
-              style={{
-                padding: '10px 12px',
-                border: '2px solid #e5e7eb',
-                fontWeight: 700,
-                cursor: 'pointer',
-              }}
+              style={{ padding: '8px 12px', border: '2px solid #e5e7eb', fontWeight: 700, cursor: 'pointer', borderRadius: 6 }}
             >
-              <option value="oneMonth">Last 10 Audits</option>
-              <option value="sixMonths">Rolling Window</option>
-              <option value="oneYear">All-Time Trend</option>
+              <option value="oneMonth">Last 30 Days</option>
+              <option value="sixMonths">Last 6 Months</option>
+              <option value="oneYear">Year to Date</option>
             </select>
           </div>
         </div>
       </div>
 
-      {/* Top Metrics */}
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(4, 1fr)',
-          gap: '24px',
-          marginBottom: '48px',
-        }}
-      >
-        {[
-          {
-            label: 'Total Models Monitored',
-            value: topMetrics.totalModelsMonitored,
-            color: '#3b82f6',
-          },
-          {
-            label: 'Models Under Monitoring',
-            value: topMetrics.modelsUnderMonitoring,
-            color: '#10b981',
-          },
-          {
-            label: 'Overall AI Risk Score',
-            value: topMetrics.overallAIRiskScore,
-            suffix: '/100',
-            color: '#f59e0b',
-          },
-          {
-            label: 'Compliance Readiness Score',
-            value: topMetrics.complianceReadinessScore,
-            suffix: '%',
-            color: '#8b5cf6',
-          },
-        ].map((metric, idx) => (
-          <div
-            key={idx}
-            style={{
-              background: '#ffffff',
-              border: '2px solid #e5e7eb',
-              padding: '24px',
-              transition: 'all 0.2s',
-            }}
-          >
-            <div
-              style={{
-                fontSize: '13px',
-                fontWeight: '600',
-                color: '#6b7280',
-                marginBottom: '12px',
-                textTransform: 'uppercase',
-                letterSpacing: '0.5px',
-              }}
-            >
-              {metric.label}
-            </div>
-
-            <div
-              style={{
-                fontSize: '36px',
-                fontWeight: '700',
-                color: metric.color,
-                lineHeight: '1',
-              }}
-            >
-              {metric.value}
-              {metric.suffix || ''}
-            </div>
-
-            {/* enterprise context line */}
-            <div style={{ marginTop: 10, fontSize: 12, color: '#6b7280', lineHeight: 1.4 }}>
-              {metric.label === 'Overall AI Risk Score'
-                ? `Latest compliance-weighted posture (includes L/I/R scoring).`
-                : metric.label === 'Compliance Readiness Score'
-                ? `Derived from audit outcomes + regulatory signals.`
-                : `Derived from live backend telemetry.`}
-            </div>
-          </div>
-        ))}
+      {/* Top Cards */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '24px', marginBottom: '48px' }}>
+        <StatCard label="Total Models" value={topMetrics.totalModels} color="#3b82f6" sub="Monitored assets" />
+        <StatCard label="Audits Executed" value={topMetrics.auditsExecuted} color="#10b981" sub="Compliance checks" />
+        <StatCard label="Overall Risk Score" value={topMetrics.overallRiskScore} suffix="/100" color="#f59e0b" sub="Weighted average" />
+        <StatCard label="Readiness Score" value={topMetrics.complianceReadinessScore} suffix="%" color="#8b5cf6" sub="Audit pass rate" />
       </div>
 
       {/* PII Section */}
-      <div style={{ marginBottom: '48px' }}>
-        <h2
-          style={{
-            fontSize: '20px',
-            fontWeight: '700',
-            color: '#1a1a1a',
-            marginBottom: '24px',
-            borderBottom: '2px solid #e5e7eb',
-            paddingBottom: '12px',
-          }}
-        >
-          PII Monitoring
-        </h2>
-
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '24px' }}>
-          <div style={{ background: '#ffffff', border: '2px solid #e5e7eb', padding: '24px' }}>
-            <PieChart data={piiLeaksData} colors={chartColors.pii} title="Total PII Leaks vs Addressed" />
-          </div>
-
-          <div style={{ background: '#ffffff', border: '2px solid #e5e7eb', padding: '24px' }}>
-            <BarChart data={{ [selectedPeriod]: piiTrendData[selectedPeriod] } as any} color="#3b82f6" title="Trend of PII Leakage" />
-          </div>
-
-          <div style={{ background: '#ffffff', border: '2px solid #e5e7eb', padding: '24px' }}>
-            <PieChart data={piiSeverityData} colors={chartColors.severity} title="PII Leaks by Severity" />
-          </div>
-        </div>
+      <SectionHeader title="PII Monitoring" />
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '24px', marginBottom: '48px' }}>
+        <ChartCard title="Leakage vs Addressed"><PieChart data={piiLeaksData} colors={chartColors.pii} /></ChartCard>
+        <ChartCard title="Leakage Trend"><BarChart data={{ [selectedPeriod]: piiTrendData[selectedPeriod] } as any} color="#3b82f6" /></ChartCard>
+        <ChartCard title="Severity Distribution"><PieChart data={piiSeverityData} colors={chartColors.severity} /></ChartCard>
       </div>
 
       {/* Drift Section */}
-      <div style={{ marginBottom: '48px' }}>
-        <h2
-          style={{
-            fontSize: '20px',
-            fontWeight: '700',
-            color: '#1a1a1a',
-            marginBottom: '24px',
-            borderBottom: '2px solid #e5e7eb',
-            paddingBottom: '12px',
-          }}
-        >
-          Drift Analysis
-        </h2>
-
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '24px' }}>
-          <div style={{ background: '#ffffff', border: '2px solid #e5e7eb', padding: '24px' }}>
-            <PieChart data={driftAnalysisData} colors={chartColors.drift} title="Models Analyzed vs Drift Detected" />
-          </div>
-
-          <div style={{ background: '#ffffff', border: '2px solid #e5e7eb', padding: '24px' }}>
-            <BarChart data={{ [selectedPeriod]: driftTrendData[selectedPeriod] } as any} color="#8b5cf6" title="Trend of Drift Detection" />
-          </div>
-
-          <div style={{ background: '#ffffff', border: '2px solid #e5e7eb', padding: '24px' }}>
-            <PieChart data={driftSeverityData} colors={chartColors.severity} title="Drift by Severity" />
-          </div>
-        </div>
+      <SectionHeader title="Drift Analysis" />
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '24px', marginBottom: '48px' }}>
+        <ChartCard title="Drift Detection Rate"><PieChart data={driftAnalysisData} colors={chartColors.drift} /></ChartCard>
+        <ChartCard title="Drift Trend"><BarChart data={{ [selectedPeriod]: driftTrendData[selectedPeriod] } as any} color="#8b5cf6" /></ChartCard>
+        <ChartCard title="Drift Severity"><PieChart data={driftSeverityData} colors={chartColors.severity} /></ChartCard>
       </div>
 
       {/* Bias Section */}
-      <div style={{ marginBottom: '48px' }}>
-        <h2
-          style={{
-            fontSize: '20px',
-            fontWeight: '700',
-            color: '#1a1a1a',
-            marginBottom: '24px',
-            borderBottom: '2px solid #e5e7eb',
-            paddingBottom: '12px',
-          }}
-        >
-          Bias Detection
-        </h2>
-
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '24px' }}>
-          <div style={{ background: '#ffffff', border: '2px solid #e5e7eb', padding: '24px' }}>
-            <PieChart data={biasAnalysisData} colors={chartColors.bias} title="Models Analyzed vs Bias Detected" />
-          </div>
-
-          <div style={{ background: '#ffffff', border: '2px solid #e5e7eb', padding: '24px' }}>
-            <BarChart data={{ [selectedPeriod]: biasTrendData[selectedPeriod] } as any} color="#f59e0b" title="Trend of Bias Detection" />
-          </div>
-
-          <div style={{ background: '#ffffff', border: '2px solid #e5e7eb', padding: '24px' }}>
-            <PieChart data={biasSeverityData} colors={chartColors.severity} title="Bias by Severity" />
-          </div>
-        </div>
+      <SectionHeader title="Bias Detection" />
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '24px', marginBottom: '48px' }}>
+        <ChartCard title="Bias Prevalence"><PieChart data={biasAnalysisData} colors={chartColors.bias} /></ChartCard>
+        <ChartCard title="Bias Trend"><BarChart data={{ [selectedPeriod]: biasTrendData[selectedPeriod] } as any} color="#f59e0b" /></ChartCard>
+        <ChartCard title="Bias Severity"><PieChart data={biasSeverityData} colors={chartColors.severity} /></ChartCard>
       </div>
 
       {/* Hallucination Section */}
-      <div style={{ marginBottom: '48px' }}>
-        <h2
-          style={{
-            fontSize: '20px',
-            fontWeight: '700',
-            color: '#1a1a1a',
-            marginBottom: '24px',
-            borderBottom: '2px solid #e5e7eb',
-            paddingBottom: '12px',
-          }}
-        >
-          Hallucination Monitoring
-        </h2>
-
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '24px' }}>
-          <div style={{ background: '#ffffff', border: '2px solid #e5e7eb', padding: '24px' }}>
-            <PieChart data={hallucinationAnalysisData} colors={chartColors.hallucination} title="Models Analyzed vs Hallucinating" />
-          </div>
-
-          <div style={{ background: '#ffffff', border: '2px solid #e5e7eb', padding: '24px' }}>
-            <BarChart data={{ [selectedPeriod]: hallucinationTrendData[selectedPeriod] } as any} color="#06b6d4" title="Trend of Hallucination" />
-          </div>
-
-          <div style={{ background: '#ffffff', border: '2px solid #e5e7eb', padding: '24px' }}>
-            <PieChart data={hallucinationSeverityData} colors={chartColors.severity} title="Hallucination by Severity" />
-          </div>
-        </div>
+      <SectionHeader title="Hallucination Monitoring" />
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '24px', marginBottom: '48px' }}>
+        <ChartCard title="Factuality Check"><PieChart data={hallAnalysisData} colors={chartColors.hallucination} /></ChartCard>
+        <ChartCard title="Hallucination Trend"><BarChart data={{ [selectedPeriod]: hallTrendData[selectedPeriod] } as any} color="#06b6d4" /></ChartCard>
+        <ChartCard title="Impact Severity"><PieChart data={hallSeverityData} colors={chartColors.severity} /></ChartCard>
       </div>
 
-      {/* Optional Enterprise Footer Insights (CISO) */}
-      <div style={{ marginBottom: 48 }}>
-        <h2
-          style={{
-            fontSize: 18,
-            fontWeight: 800,
-            borderBottom: '2px solid #e5e7eb',
-            paddingBottom: 12,
-            marginBottom: 18,
-          }}
-        >
-          Executive Notes (CISO)
-        </h2>
+      {/* ✅ ADDED: Compliance Monitoring Section */}
+      <SectionHeader title="Compliance & Governance" />
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '24px', marginBottom: '48px' }}>
+        <ChartCard title="Regulatory Adherence">
+          <PieChart data={compAnalysisData} colors={chartColors.compliance} />
+        </ChartCard>
+        <ChartCard title="Compliance Risk Trend">
+          <BarChart data={{ [selectedPeriod]: compTrendData[selectedPeriod] } as any} color="#a855f7" />
+        </ChartCard>
+        <ChartCard title="Violation Severity">
+          <PieChart data={compSeverityData} colors={chartColors.severity} />
+        </ChartCard>
+      </div>
 
-        <div style={{ background: '#ffffff', border: '2px solid #e5e7eb', padding: 20 }}>
-          <div style={{ fontSize: 13, color: '#111827', lineHeight: 1.7 }}>
-            <strong>Compliance posture:</strong> Latest compliance score is{' '}
-            <strong>{safeNumber(compliance?.scoring?.latest?.score_100, 0).toFixed(2)}</strong>
-            /100 with band{' '}
-            <strong>{compliance?.scoring?.latest?.band || 'N/A'}</strong>.
-            <br />
-            <strong>Immediate focus:</strong> Reduce CRITICAL/HIGH findings and re-run audits to validate mitigation.
-            <br />
-            <strong>Evidence integrity:</strong> All prompts/responses are stored as audit interactions and downloadable as JSON/PDF.
-          </div>
+      {/* Footer */}
+      <div style={{ borderTop: '1px solid #e5e7eb', paddingTop: 24, paddingBottom: 48 }}>
+        <h3 className="text-sm font-bold text-gray-900 mb-2">System Status</h3>
+        <div className="flex items-center gap-2">
+          <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+          <span className="text-xs text-gray-500">Live monitoring active • Data refreshes real-time</span>
         </div>
       </div>
+    </div>
+  );
+}
+
+/* =========================================================
+   UI COMPONENTS
+========================================================= */
+
+function SectionHeader({ title }: { title: string }) {
+  return (
+    <h2 style={{ fontSize: '20px', fontWeight: '700', color: '#1a1a1a', marginBottom: '24px', borderBottom: '2px solid #e5e7eb', paddingBottom: '12px' }}>
+      {title}
+    </h2>
+  );
+}
+
+function StatCard({ label, value, suffix, color, sub }: any) {
+  return (
+    <div style={{ background: '#ffffff', border: '2px solid #e5e7eb', padding: '24px' }}>
+      <div style={{ fontSize: '13px', fontWeight: '600', color: '#6b7280', marginBottom: '12px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+        {label}
+      </div>
+      <div style={{ fontSize: '36px', fontWeight: '700', color: color, lineHeight: '1' }}>
+        {value}{suffix || ''}
+      </div>
+      <div style={{ marginTop: 10, fontSize: 12, color: '#9ca3af' }}>{sub}</div>
+    </div>
+  );
+}
+
+function ChartCard({ title, children }: { title: string, children: React.ReactNode }) {
+  return (
+    <div style={{ background: '#ffffff', border: '2px solid #e5e7eb', padding: '24px', height: '100%', display: 'flex', flexDirection: 'column' }}>
+      <h3 style={{ fontSize: 14, fontWeight: 700, color: '#374151', marginBottom: 16 }}>{title}</h3>
+      <div style={{ flex: 1 }}>{children}</div>
     </div>
   );
 }

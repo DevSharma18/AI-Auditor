@@ -7,50 +7,39 @@ from typing import Any, Dict, List
 
 SEVERITY_ORDER = ["CRITICAL", "HIGH", "MEDIUM", "LOW"]
 
-
 def _safe(v: Any) -> str:
-    return "" if v is None else str(v)
-
+    """Safely convert any value to string, handling None."""
+    if v is None:
+        return ""
+    return str(v).strip()
 
 def _norm_category(v: str) -> str:
-    return (v or "").strip().lower()
-
+    return _safe(v).lower()
 
 def _norm_severity(v: str) -> str:
-    return (v or "").strip().upper()
-
+    return _safe(v).upper()
 
 def _norm_metric(v: str) -> str:
-    return (v or "").strip().lower()
-
-
-def _norm_desc(v: str) -> str:
-    d = (v or "").strip()
-    d_low = d.lower()
-    if len(d_low) > 160:
-        d_low = d_low[:160]
-    return d_low
-
+    return _safe(v).lower()
 
 def _fingerprint_dict_finding(f: Dict[str, Any]) -> str:
-    category = _norm_category(_safe(f.get("category")))
-    metric = _norm_metric(_safe(f.get("metric_name")))
-    desc = _norm_desc(_safe(f.get("description")))
+    """
+    Creates a unique signature for grouping findings.
+    Now handles extra whitespace and capitalization more aggressively.
+    """
+    category = _norm_category(f.get("category"))
+    metric = _norm_metric(f.get("metric_name"))
+    desc = _safe(f.get("description")).lower()
+    # Collapse multiple spaces to one to avoid duplicate findings due to formatting
+    desc = " ".join(desc.split())
+    if len(desc) > 160:
+        desc = desc[:160]
     return f"{category}::{metric}::{desc}"
-
 
 def _severity_rank(sev: str) -> int:
     s = _norm_severity(sev)
-    if s == "CRITICAL":
-        return 4
-    if s == "HIGH":
-        return 3
-    if s == "MEDIUM":
-        return 2
-    if s == "LOW":
-        return 1
-    return 0
-
+    mapping = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
+    return mapping.get(s, 0)
 
 def build_structured_report(
     audit: Dict[str, Any],
@@ -60,29 +49,27 @@ def build_structured_report(
     global_risk: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """
-    Enterprise structured report:
-    - Deduplicates findings into "issues"
-    - Adds occurrences count
-    - Adds limited evidence references (IDs + metadata only)
-    - Includes metric scoring + global risk
-    - Does NOT dump all prompt/response logs
+    Constructs the Data Object for the report.
+    Enhancements:
+    - Robust interaction mapping (str vs int IDs).
+    - Smart Executive Summary generation based on top failing categories.
     """
 
     metric_scores = metric_scores or []
     global_risk = global_risk or {}
 
-    # Index interactions by id (internal linkage only)
-    interaction_by_id: Dict[int, Dict[str, Any]] = {}
+    # Index interactions by interaction_id (handling both string and int formats)
+    interaction_by_id: Dict[str, Dict[str, Any]] = {}
     for i in interactions:
         iid = i.get("interaction_id")
-        if isinstance(iid, int):
-            interaction_by_id[iid] = i
+        if iid is not None:
+            interaction_by_id[str(iid)] = i
 
     # ----------------------------
-    # SUMMARY
+    # SUMMARY & COUNTS
     # ----------------------------
-    severity_counts = Counter(_norm_severity(_safe(f.get("severity", "UNKNOWN"))) for f in findings)
-    category_counts = Counter(_norm_category(_safe(f.get("category", "unknown"))) for f in findings)
+    severity_counts = Counter(_norm_severity(f.get("severity")) for f in findings)
+    category_counts = Counter(_norm_category(f.get("category")) for f in findings)
 
     summary = {
         "total_findings_raw": len(findings),
@@ -92,7 +79,7 @@ def build_structured_report(
     }
 
     # ----------------------------
-    # GROUP FINDINGS (DEDUP)
+    # GROUPING & DEDUPLICATION
     # ----------------------------
     grouped_map: Dict[str, Dict[str, Any]] = {}
     grouped_order: List[str] = []
@@ -102,105 +89,93 @@ def build_structured_report(
 
         if fp not in grouped_map:
             grouped_order.append(fp)
-
-            category = _norm_category(_safe(f.get("category")))
-            metric_name = _safe(f.get("metric_name")).strip()
-            initial_severity = _norm_severity(_safe(f.get("severity")))
+            
+            # Clean basic fields
+            cat_clean = _norm_category(f.get("category"))
+            sev_clean = _norm_severity(f.get("severity"))
 
             grouped_map[fp] = {
                 "issue_id": fp,
-                "category": category.upper() if category else "UNKNOWN",
-                "severity": initial_severity if initial_severity else "UNKNOWN",
-                "metric_name": metric_name,
-                "description": _safe(f.get("description")).strip(),
+                "category": cat_clean.upper() if cat_clean else "UNKNOWN",
+                "severity": sev_clean if sev_clean else "LOW",
+                "metric_name": _safe(f.get("metric_name")),
+                "description": _safe(f.get("description")),
                 "explain": f.get("explain") or None,
                 "remediation": f.get("remediation") or None,
                 "occurrences": 0,
-
-                # evidence references only (do not include raw text)
                 "evidence_samples": [],
             }
 
         grouped_map[fp]["occurrences"] += 1
 
-        # keep highest severity
-        current_sev = grouped_map[fp].get("severity", "UNKNOWN")
-        incoming_sev = _norm_severity(_safe(f.get("severity")))
+        # Upgrade severity if a duplicate finding has a higher severity
+        current_sev = grouped_map[fp]["severity"]
+        incoming_sev = _norm_severity(f.get("severity"))
         if _severity_rank(incoming_sev) > _severity_rank(current_sev):
             grouped_map[fp]["severity"] = incoming_sev
 
-        # Add evidence sample (max 3 refs per issue)
+        # Attach evidence (up to 3 samples)
         if len(grouped_map[fp]["evidence_samples"]) < 3:
-            interaction_id = f.get("interaction_id")
-            prompt_id = f.get("prompt_id")
-
+            iid = str(f.get("interaction_id", ""))
+            
             evidence_item = {
                 "finding_id": _safe(f.get("finding_id")),
-                "prompt_id": prompt_id,
-                "interaction_id": interaction_id,
-                "created_at": None,
-                "latency_ms": None,
+                "prompt_id": _safe(f.get("prompt_id")),
+                "interaction_id": iid,
+                "description": _safe(f.get("description")),
             }
 
-            # attach only metadata
-            if isinstance(interaction_id, int) and interaction_id in interaction_by_id:
-                src = interaction_by_id[interaction_id]
-                evidence_item["created_at"] = src.get("created_at")
-                evidence_item["latency_ms"] = src.get("latency_ms")
+            # Hydrate with actual prompt/response data
+            if iid in interaction_by_id:
+                src = interaction_by_id[iid]
+                evidence_item.update({
+                    "prompt": src.get("prompt", ""),
+                    "response": src.get("response", ""),
+                    "latency_ms": src.get("latency_ms", 0),
+                    "created_at": src.get("created_at", "")
+                })
 
             grouped_map[fp]["evidence_samples"].append(evidence_item)
 
     grouped_findings = [grouped_map[k] for k in grouped_order]
 
     # ----------------------------
-    # EXECUTIVE SUMMARY LINES
+    # SMART EXECUTIVE SUMMARY
     # ----------------------------
     critical = summary["by_severity"].get("CRITICAL", 0)
     high = summary["by_severity"].get("HIGH", 0)
-    medium = summary["by_severity"].get("MEDIUM", 0)
-    low = summary["by_severity"].get("LOW", 0)
-
+    
+    # Determine Risk Level
     risk_level = "LOW"
-    if critical > 0:
-        risk_level = "HIGH"
-    elif high >= 3:
-        risk_level = "MEDIUM"
+    score_val = global_risk.get("score_100")
+    
+    if score_val is not None:
+        # Trust the calculated score if available
+        if score_val >= 80: risk_level = "CRITICAL"
+        elif score_val >= 60: risk_level = "HIGH"
+        elif score_val >= 40: risk_level = "MEDIUM"
+    else:
+        # Fallback to counts
+        if critical > 0: risk_level = "HIGH"
+        elif high >= 3: risk_level = "MEDIUM"
+
+    # Identify top failing categories
+    top_categories = [k for k, v in category_counts.most_common(3)]
+    cat_text = ", ".join(c.upper() for c in top_categories) if top_categories else "None"
 
     executive_summary = [
-        f"Overall risk level: {risk_level}.",
-        f"Unique issues detected: {len(grouped_findings)}.",
-        f"Raw findings recorded: {len(findings)} (deduplicated in this report).",
-        f"Severity totals — CRITICAL: {critical}, HIGH: {high}, MEDIUM: {medium}, LOW: {low}.",
+        f"Overall Audit Risk Level: {risk_level}.",
+        f"Primary risk areas detected: {cat_text}.",
+        f"Total unique issues identified: {len(grouped_findings)} (from {len(findings)} raw signals).",
+        f"Breakdown by Severity: {critical} Critical, {high} High, {summary['by_severity'].get('MEDIUM',0)} Medium.",
     ]
 
-    # ----------------------------
-    # TOP-LEVEL EVIDENCE SAMPLES (for PDF)
-    # - keep max 3 across whole report
-    # - references only (no raw prompt/response)
-    # ----------------------------
-    flat_evidence: List[Dict[str, Any]] = []
-    for issue in grouped_findings:
-        for e in issue.get("evidence_samples", []) or []:
-            if len(flat_evidence) >= 3:
-                break
-            flat_evidence.append(e)
-        if len(flat_evidence) >= 3:
-            break
-
-    # ----------------------------
-    # FINAL STRUCTURE (Stable Contract)
-    # ----------------------------
     return {
         "audit": audit,
         "summary": summary,
         "executive_summary": executive_summary,
-
         "global_risk": global_risk,
         "metric_scores": metric_scores,
-
         "grouped_findings": grouped_findings,
         "unique_issue_count": len(grouped_findings),
-
-        # ✅ used by report_pdf_reportlab.py
-        "evidence_samples": flat_evidence,
     }

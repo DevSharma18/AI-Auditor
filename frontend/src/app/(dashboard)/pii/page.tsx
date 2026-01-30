@@ -24,14 +24,14 @@ type MetricPoint = {
   score_100?: number;
   band?: string;
 
-  // L / I / R in 0..1
   L?: number;
   I?: number;
   R?: number;
 
-  // Your backend often includes these (optional)
-  frameworks?: Record<string, any>;
+  // ✅ Live Data Containers
+  frameworks?: Record<string, number>;
   signals?: Record<string, any>;
+  
   alpha?: number;
   beta?: number;
 };
@@ -69,17 +69,21 @@ function safeDateLabel(executedAt: string | null | undefined, auditId?: string) 
   }
 }
 
-function pct01(v: any) {
-  // backend sends L/I/R in 0..1
-  return `${Math.round(safeNumber(v, 0) * 1000) / 10}%`;
-}
-
 function safeNumberInt(v: any, fallback = 0) {
   return Math.round(safeNumber(v, fallback));
 }
 
+// ✅ UTILITY: Converts backend keys like "pii_aadhaar_detected" -> "Aadhaar"
+function humanizeSignal(key: string) {
+  return key
+    .replace(/^pii_/, '')
+    .replace(/_detected$/, '')
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (l) => l.toUpperCase());
+}
+
 /* =========================
-   PAGE
+   PAGE COMPONENT
 ========================= */
 
 export default function PIIPage() {
@@ -90,7 +94,7 @@ export default function PIIPage() {
   const [payload, setPayload] = useState<MetricApiResponse | null>(null);
 
   const [models, setModels] = useState<ModelRow[]>([]);
-  const [selectedModelId, setSelectedModelId] = useState<string>(''); // empty = global view
+  const [selectedModelId, setSelectedModelId] = useState<string>('');
 
   const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
 
@@ -111,8 +115,6 @@ export default function PIIPage() {
       setLoading(true);
       setError(null);
 
-      // ✅ If backend supports model filter, it will work.
-      // If not, it will throw error and we show it cleanly.
       const qp = modelId ? `?model_id=${encodeURIComponent(modelId)}` : '';
       const data = await apiGet<MetricApiResponse>(`/metrics/pii${qp}`);
 
@@ -157,228 +159,93 @@ export default function PIIPage() {
     ];
   }, [latest]);
 
-  const trendPoints = useMemo(() => {
-    if (!Array.isArray(trend) || trend.length === 0) return [];
-    return trend.slice(-10).map((x, idx) => ({
+  const trendBucketData = useMemo(() => {
+    if (!Array.isArray(trend) || trend.length === 0) return { oneMonth: [], sixMonths: [], oneYear: [] };
+    const points = trend.slice(-10).map((x, idx) => ({
       name: safeDateLabel(x.executed_at, x.audit_id || `audit_${idx + 1}`),
       value: safeNumber(x.score_100, 0),
     }));
+    return {
+      oneMonth: points.slice(-3),
+      sixMonths: points.slice(-6),
+      oneYear: points,
+    };
   }, [trend]);
 
-  const trendBucketData = useMemo(() => {
-    const last10 = trendPoints.slice(-10);
-    const last6 = trendPoints.slice(-6);
-    const last3 = trendPoints.slice(-3);
-
-    return {
-      oneMonth: last3,
-      sixMonths: last6,
-      oneYear: last10,
-    };
-  }, [trendPoints]);
-
   const frameworkBreakdownChart = useMemo(() => {
+    // Backend sends these as raw scores (0.0 - 1.0)
     const gdpr = safeNumber(frameworks.GDPR, 0);
     const euai = safeNumber(frameworks.EUAI, 0);
-    const owasp = safeNumber(frameworks.OWASP_AI, 0);
+    const dpdp = safeNumber(frameworks.DPDP, 0); // ✅ Live Key
 
     return [
-      { name: 'GDPR', value: Math.round(gdpr * 100) },
-      { name: 'EU AI Act', value: Math.round(euai * 100) },
-      { name: 'OWASP AI', value: Math.round(owasp * 100) },
+      { name: 'GDPR Risk', value: Math.round(gdpr * 100) },
+      { name: 'EU AI Risk', value: Math.round(euai * 100) },
+      { name: 'DPDP Risk', value: Math.round(dpdp * 100) },
     ];
   }, [frameworks]);
 
-  const safeTitle: React.CSSProperties = {
-    fontSize: '28px',
-    fontWeight: '700',
-    color: '#1a1a1a',
-    marginBottom: '8px',
-    lineHeight: 1.2,
-    wordBreak: 'break-word',
-  };
-
-  const safeSub: React.CSSProperties = {
-    fontSize: '14px',
-    color: '#6b7280',
-    lineHeight: 1.5,
-    wordBreak: 'break-word',
-  };
-
-  const controlsBox = {
-    border: '2px solid #e5e7eb',
-    padding: '14px 16px',
-    marginBottom: '24px',
-    display: 'flex',
-    gap: '12px',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    flexWrap: 'wrap' as const,
-  };
-
-  const leftControls = {
-    display: 'flex',
-    gap: '12px',
-    alignItems: 'center',
-    flexWrap: 'wrap' as const,
-  };
-
-  const rightControls = {
-    display: 'flex',
-    gap: '10px',
-    alignItems: 'center',
-    flexWrap: 'wrap' as const,
-  };
-
-  const selectStyle = {
-    border: '2px solid #e5e7eb',
-    padding: '10px 12px',
-    fontSize: '13px',
-    fontWeight: 700,
-    color: '#111827',
-    background: '#ffffff',
-    outline: 'none',
-    minWidth: 260,
-  } as const;
-
-  const btn = {
-    border: '2px solid #e5e7eb',
-    padding: '10px 12px',
-    fontSize: 13,
-    fontWeight: 900,
-    color: '#111827',
-    background: '#ffffff',
-    cursor: 'pointer',
-  } as const;
-
-  const statusBadge = (text: string, color: string) => ({
-    border: `2px solid ${color}`,
-    color,
-    padding: '6px 10px',
-    fontSize: 12,
-    fontWeight: 900,
-    textTransform: 'uppercase' as const,
-    letterSpacing: '0.5px',
-    display: 'inline-block',
-  });
+  // ✅ LIVE DATA: Dynamic Category List
+  // Extracts specific keys like "pii_email_detected" from the signals map
+  const categoryList = Object.entries(signals)
+    .filter(([k]) => k !== 'finding_count' && k !== 'interactions' && k !== 'frequency_ratio')
+    .map(([k, v]) => ({
+      label: humanizeSignal(k),
+      count: Number(v),
+    }))
+    .sort((a, b) => b.count - a.count);
 
   /* =========================
-     STATES
+     UI RENDER
   ========================= */
 
+  // State: Loading
   if (loading) {
     return (
       <div style={{ minHeight: '100vh', background: '#ffffff', padding: 0 }}>
         <div style={{ marginBottom: 32 }}>
           <h1 style={safeTitle}>PII Monitoring</h1>
-          <p style={safeSub}>Loading PII governance posture…</p>
+          <p style={safeSub}>Loading governance posture...</p>
         </div>
       </div>
     );
   }
 
+  // State: Error
   if (error) {
     return (
-      <div style={{ minHeight: '100vh', background: '#ffffff', padding: 0 }}>
-        <div style={{ marginBottom: 32 }}>
-          <h1 style={safeTitle}>PII Monitoring</h1>
-          <p style={safeSub}>Track and reduce exposure of personally identifiable information in AI outputs.</p>
-        </div>
-
-        {/* Controls */}
-        <div style={controlsBox}>
-          <div style={leftControls}>
-            <select
-              style={selectStyle}
-              value={selectedModelId}
-              onChange={(e) => setSelectedModelId(e.target.value)}
-              disabled={modelsLoading}
-            >
-              <option value="">
-                {modelsLoading ? 'Loading models…' : 'All Models (Global View)'}
-              </option>
-              {models.map((m) => (
-                <option key={m.id} value={m.model_id}>
-                  {m.name} ({m.model_id})
-                </option>
-              ))}
-            </select>
-
-            <span style={statusBadge('ERROR', '#dc2626')}>ERROR</span>
-          </div>
-
-          <div style={rightControls}>
-            <button style={btn} onClick={() => loadPII(selectedModelId || undefined)}>
-              Refresh
-            </button>
-          </div>
-        </div>
-
-        <div style={{ background: '#fef2f2', border: '2px solid #fca5a5', padding: 18 }}>
-          <div style={{ fontSize: 14, fontWeight: 800, color: '#991b1b' }}>Failed to load PII scoring</div>
-          <div style={{ marginTop: 6, fontSize: 13, color: '#7f1d1d', lineHeight: 1.5 }}>{error}</div>
-
-          <div style={{ marginTop: 10, fontSize: 12, color: '#7f1d1d' }}>
-            Tip: If model filtering is not supported in backend yet, selecting a model may error. You can keep global view
-            until backend supports <b>?model_id=</b>.
-          </div>
-        </div>
+      <div style={{ padding: 40, background: '#fef2f2', border: '1px solid #fca5a5' }}>
+        <h3 style={{ color: '#991b1b', fontWeight: 900 }}>Failed to load PII metrics</h3>
+        <p style={{ color: '#7f1d1d' }}>{error}</p>
+        <button style={btn} onClick={() => loadPII(selectedModelId || undefined)}>Retry</button>
       </div>
     );
   }
 
-  if (!scoring || scoring.status === 'NO_DATA' || !latest) {
+  // State: No Data
+  if (!latest) {
     return (
-      <div style={{ minHeight: '100vh', background: '#ffffff', padding: 0 }}>
-        <div style={{ marginBottom: 32 }}>
-          <h1 style={safeTitle}>PII Monitoring</h1>
-          <p style={safeSub}>No PII scoring available yet. Run at least one audit to populate this page.</p>
-        </div>
-
-        <div style={controlsBox}>
-          <div style={leftControls}>
-            <select
-              style={selectStyle}
-              value={selectedModelId}
-              onChange={(e) => setSelectedModelId(e.target.value)}
-              disabled={modelsLoading}
-            >
-              <option value="">
-                {modelsLoading ? 'Loading models…' : 'All Models (Global View)'}
-              </option>
-              {models.map((m) => (
-                <option key={m.id} value={m.model_id}>
-                  {m.name} ({m.model_id})
-                </option>
-              ))}
-            </select>
-
-            <span style={statusBadge('NO DATA', '#6b7280')}>NO DATA</span>
-          </div>
-
-          <div style={rightControls}>
-            <button style={btn} onClick={() => loadPII(selectedModelId || undefined)}>
-              Refresh
-            </button>
-          </div>
-        </div>
+      <div style={{ padding: 40, border: '1px solid #e5e7eb' }}>
+        <h3 style={{ fontWeight: 900 }}>No PII data found.</h3>
+        <p style={{ color: '#666', marginBottom: 12 }}>Run a new audit to generate PII signals.</p>
+        <button style={btn} onClick={() => loadPII(selectedModelId || undefined)}>Refresh</button>
       </div>
     );
   }
-
-  /* =========================
-     MAIN UI
-  ========================= */
 
   return (
     <div style={{ minHeight: '100vh', background: '#ffffff', padding: 0 }}>
+      
       {/* Header */}
       <div style={{ marginBottom: 22 }}>
         <h1 style={safeTitle}>PII Monitoring</h1>
         <p style={safeSub}>
-          PII risk measures whether an AI system might expose personal data (emails, phone numbers, IDs). This can create
-          direct legal exposure under privacy regulations and data protection standards.
+          PII risk measures whether an AI system might expose personal data (emails, phone numbers, IDs). 
+          High scores indicate potential regulatory violations (GDPR, DPDP).
         </p>
+        <div style={{ fontSize: 13, color: '#9ca3af', marginTop: 8 }}>
+          Last updated: {lastUpdatedAt ? new Date(lastUpdatedAt).toLocaleString() : '-'}
+        </div>
       </div>
 
       {/* Controls */}
@@ -401,12 +268,6 @@ export default function PIIPage() {
           </select>
 
           <span style={statusBadge('OK', '#10b981')}>OK</span>
-
-          {lastUpdatedAt && (
-            <span style={{ fontSize: 12, color: '#6b7280', fontWeight: 700 }}>
-              Last updated: {new Date(lastUpdatedAt).toLocaleString()}
-            </span>
-          )}
         </div>
 
         <div style={rightControls}>
@@ -426,7 +287,7 @@ export default function PIIPage() {
               title="PII Risk Score"
               value={`${Math.round(safeNumber(latest.score_100, 0))}/100`}
               color={clr}
-              description="Enterprise risk score (0–100). Higher means higher likelihood of PII exposure."
+              description="Enterprise risk score (0–100). Higher = More PII detected."
             />
           </div>
 
@@ -435,16 +296,16 @@ export default function PIIPage() {
               title="Risk Band"
               value={band}
               color={clr}
-              description="Executive label used for governance decisions and reporting."
+              description="Executive label used for governance decisions."
             />
           </div>
 
           <div style={cardBox}>
             <MetricCard
               title="Coverage (Latest Audit)"
-              value={`${interactionCount} checks`}
+              value={`${interactionCount} prompts`}
               color="#3b82f6"
-              description="How many prompt/response interactions contributed to this PII score."
+              description="Number of interactions audited for PII."
             />
           </div>
         </div>
@@ -452,7 +313,7 @@ export default function PIIPage() {
         {/* Signals Row */}
         <div style={{ marginTop: 24, display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 24 }}>
           <div style={cardBox}>
-            <MiniMetric title="Signals Observed" value={findingCount} hint="PII-related findings detected" />
+            <MiniMetric title="Signals Observed" value={findingCount} hint="PII findings detected" />
           </div>
           <div style={cardBox}>
             <MiniMetric title="Frequency Ratio" value={`${Math.round(freqRatio * 10000) / 100}%`} hint="Density of PII findings" />
@@ -467,94 +328,99 @@ export default function PIIPage() {
         </div>
       </div>
 
-      {/* What counts as PII */}
-      <div style={{ border: '2px solid #e5e7eb', padding: 18, marginBottom: 28 }}>
-        <div style={{ fontSize: 16, fontWeight: 900, marginBottom: 8, color: '#111827' }}>
-          What counts as PII (simple)
-        </div>
-        <div style={{ fontSize: 13, color: '#6b7280', lineHeight: 1.65 }}>
-          PII includes information that can identify a person directly or indirectly:
-          <br />
-          <b>Email</b>, <b>phone numbers</b>, <b>addresses</b>, <b>government ID numbers</b>, <b>bank details</b>,
-          <b>health identifiers</b>, or any unique user-linked identifiers.
+      {/* ✅ LIVE DETECTED CATEGORIES */}
+      <div style={{ marginBottom: 48 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24 }}>
+          
+          {/* Categories Table */}
+          <div>
+            <h2 style={sectionTitle}>Detected PII Categories (Live)</h2>
+            <div style={{ border: '2px solid #e5e7eb', background: '#fff' }}>
+              {categoryList.length === 0 ? (
+                <div style={{ padding: 32, textAlign: 'center', color: '#6b7280' }}>
+                  <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 4 }}>Clean Run ✅</div>
+                  <div style={{ fontSize: 13 }}>No PII categories were detected in the latest audit.</div>
+                </div>
+              ) : (
+                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                  <thead>
+                    <tr style={{ borderBottom: '2px solid #e5e7eb', background: '#f9fafb' }}>
+                      <th style={{ textAlign: 'left', padding: 12, fontSize: 12 }}>PII Type</th>
+                      <th style={{ textAlign: 'right', padding: 12, fontSize: 12 }}>Occurrences</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {categoryList.map((row, i) => (
+                      <tr key={i} style={{ borderBottom: '1px solid #f3f4f6' }}>
+                        <td style={{ padding: 12, fontSize: 14, fontWeight: 600, color: '#1f2937' }}>
+                          {row.label}
+                        </td>
+                        <td style={{ padding: 12, textAlign: 'right', fontWeight: 900, color: '#ef4444' }}>
+                          {row.count}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+
+          {/* Trend Chart */}
+          <div>
+            <h2 style={sectionTitle}>Historical PII Risk</h2>
+            <div style={{ border: '2px solid #e5e7eb', padding: 24 }}>
+              <BarChart data={trendBucketData} color={clr} title="PII Risk Trend" />
+            </div>
+          </div>
         </div>
       </div>
 
-      {/* CHARTS */}
-      <div style={{ marginBottom: 48 }}>
-        <h2 style={sectionTitle}>PII Trend & Scoring Drivers</h2>
-
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 24 }}>
-          {/* L/I/R */}
-          <div style={{ background: '#ffffff', border: '2px solid #e5e7eb', padding: 24, overflow: 'hidden' }}>
+      {/* Breakdown & Frameworks */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24, marginBottom: 48 }}>
+        <div>
+          <h2 style={sectionTitle}>Scoring Drivers (L / I / R)</h2>
+          <div style={{ border: '2px solid #e5e7eb', padding: 24 }}>
             <PieChart
               data={scoringBreakdown}
               colors={['#3b82f6', '#f59e0b', '#dc2626']}
-              title="Scoring Breakdown (L / I / R)"
+              title="Scoring Breakdown"
             />
           </div>
+        </div>
 
-          {/* Trend */}
-          <div style={{ background: '#ffffff', border: '2px solid #e5e7eb', padding: 24, overflow: 'hidden' }}>
-            <BarChart data={trendBucketData} color={clr} title="Trend of PII Leakage (0–100)" />
-          </div>
-
-          {/* Framework pressure */}
-          <div style={{ background: '#ffffff', border: '2px solid #e5e7eb', padding: 24, overflow: 'hidden' }}>
+        <div>
+          <h2 style={sectionTitle}>Framework Pressure (Risk)</h2>
+          <div style={{ border: '2px solid #e5e7eb', padding: 24 }}>
             <PieChart
               data={frameworkBreakdownChart}
               colors={['#111827', '#3b82f6', '#10b981']}
-              title="Framework Pressure (Relative)"
+              title="Framework Risk Distribution"
             />
             <div style={{ marginTop: 10, fontSize: 12, color: '#6b7280', lineHeight: 1.6 }}>
-              Indicates governance and regulatory relevance, not legal compliance status.
+              Shows which regulations (GDPR, EUAI, DPDP) are most at risk based on findings.
             </div>
           </div>
         </div>
       </div>
 
-      {/* Enterprise Actions */}
+      {/* Guidance */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24, marginBottom: 48 }}>
         <div>
-          <h2 style={sectionTitle}>Most Common Exposure Path (Guidance)</h2>
+          <h2 style={sectionTitle}>Mitigation Actions</h2>
           <div style={{ border: '2px solid #e5e7eb', padding: 18 }}>
             <ActionItem
-              title="Output leakage (most likely)"
-              text="Block sensitive outputs by adding redaction rules. Use a PII filter before returning responses to users."
+              title="Output Redaction"
+              text="Implement regex-based redaction filters for Email, Phone, and Aadhaar patterns before returning responses."
             />
             <ActionItem
-              title="Input leakage"
-              text="Mask user-provided identifiers before sending prompts to any model. Store only hashed or tokenized versions."
+              title="Input Masking"
+              text="Ensure user prompts are scanned for PII (Input Guardrails) before reaching the LLM."
             />
             <ActionItem
-              title="Logs / observability"
-              text="Ensure system logs never store raw prompts or model outputs containing personal data. Add retention policies."
+              title="Audit Logs"
+              text="Verify that your audit logs do not persist unmasked PII. Apply retention policies."
             />
-            <ActionItem
-              title="Re-audit after fixes"
-              text="After changing prompts, guardrails, or pipelines, re-run audits to confirm PII risk is reduced."
-            />
-          </div>
-        </div>
-
-        <div>
-          <h2 style={sectionTitle}>PII Categories (Coming Soon)</h2>
-          <div style={{ border: '2px solid #e5e7eb', padding: 18 }}>
-            <div style={{ fontSize: 13, color: '#6b7280', lineHeight: 1.7 }}>
-              Your current backend scoring provides <b>overall PII risk</b> and scoring drivers.
-              <br />
-              To enable category breakdown like:
-              <br />• Contact info (email/phone)
-              <br />• Financial (card/bank)
-              <br />• Identity docs (passport/ID)
-              <br />• Health data
-              <br />
-              we will add <b>PII type classification per finding</b> in backend and expose it via API.
-            </div>
-
-            <div style={{ marginTop: 14, fontSize: 12, color: '#111827', fontWeight: 900 }}>
-              Next backend enhancement: classify PII type + source attribution per finding
-            </div>
           </div>
         </div>
       </div>
@@ -563,7 +429,7 @@ export default function PIIPage() {
 }
 
 /* =========================
-   SMALL COMPONENTS
+   COMPONENTS
 ========================= */
 
 function MetricCard({
@@ -624,6 +490,79 @@ function ActionItem({ title, text }: { title: string; text: string }) {
 /* =========================
    STYLES
 ========================= */
+
+const safeTitle = {
+  fontSize: '28px',
+  fontWeight: '700',
+  color: '#1a1a1a',
+  marginBottom: '8px',
+  lineHeight: 1.2,
+  wordBreak: 'break-word' as const,
+};
+
+const safeSub = {
+  fontSize: '14px',
+  color: '#6b7280',
+  lineHeight: 1.5,
+  wordBreak: 'break-word' as const,
+};
+
+const controlsBox = {
+  border: '2px solid #e5e7eb',
+  padding: '14px 16px',
+  marginBottom: '24px',
+  display: 'flex',
+  gap: '12px',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  flexWrap: 'wrap' as const,
+};
+
+const leftControls = {
+  display: 'flex',
+  gap: '12px',
+  alignItems: 'center',
+  flexWrap: 'wrap' as const,
+};
+
+const rightControls = {
+  display: 'flex',
+  gap: '10px',
+  alignItems: 'center',
+  flexWrap: 'wrap' as const,
+};
+
+const selectStyle = {
+  border: '2px solid #e5e7eb',
+  padding: '10px 12px',
+  fontSize: '13px',
+  fontWeight: 700,
+  color: '#111827',
+  background: '#ffffff',
+  outline: 'none',
+  minWidth: 260,
+} as const;
+
+const btn = {
+  border: '2px solid #e5e7eb',
+  padding: '10px 12px',
+  fontSize: 13,
+  fontWeight: 900,
+  color: '#111827',
+  background: '#ffffff',
+  cursor: 'pointer',
+} as const;
+
+const statusBadge = (text: string, color: string) => ({
+  border: `2px solid ${color}`,
+  color,
+  padding: '6px 10px',
+  fontSize: 12,
+  fontWeight: 900,
+  textTransform: 'uppercase' as const,
+  letterSpacing: '0.5px',
+  display: 'inline-block',
+});
 
 const sectionTitle = {
   fontSize: '20px',

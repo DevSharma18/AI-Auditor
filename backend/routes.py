@@ -1,10 +1,9 @@
-# backend/routes.py
-
 from __future__ import annotations
 
 from datetime import datetime
 import logging
 import uuid
+import threading
 from typing import List, Dict, Any
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
@@ -21,6 +20,7 @@ from .models import (
     AuditInteraction,
     AuditMetricScore,
     AuditSummary,
+    ExecutionStatus
 )
 from .schemas import ModelResponse, AuditResponse, RegisterModelRequest
 from .audit_engine import AuditEngine
@@ -32,6 +32,46 @@ from .report_pdf_reportlab import generate_audit_pdf_bytes
 logger = logging.getLogger("ai-auditor")
 
 router = APIRouter(tags=["Core"])
+
+# ✅ Enterprise Registry: Tracking active background tasks for cancellation
+active_audit_tasks: Dict[str, threading.Event] = {}
+
+
+# =========================================================
+# Background runner (Enterprise Managed)
+# =========================================================
+
+def _run_audit_background(model_id: str, audit_public_id: str, cancel_event: threading.Event):
+    db: Session = SessionLocal()
+    try:
+        logger.info(f"Background audit START model_id={model_id} audit_id={audit_public_id}")
+
+        model = db.query(AIModel).filter(AIModel.model_id == model_id).first()
+        audit_row = db.query(AuditRun).filter(AuditRun.audit_id == audit_public_id).first()
+        
+        if not model or not audit_row:
+            logger.warning(f"Background audit: Model/Audit not found for {audit_public_id}")
+            return
+
+        policy = db.query(AuditPolicy).filter(AuditPolicy.model_id == model.id).first()
+        engine = AuditEngine(db)
+
+        engine.run_active_audit(model, policy, audit_public_id, cancel_event=cancel_event)
+        logger.info(f"Background audit END model_id={model_id} audit_id={audit_public_id}")
+
+    except Exception as exc:
+        logger.exception(f"Background audit failed audit_id={audit_public_id}: {exc}")
+        try:
+            audit_row = db.query(AuditRun).filter(AuditRun.audit_id == audit_public_id).first()
+            if audit_row and audit_row.execution_status != "CANCELLED":
+                audit_row.execution_status = "FAILED"
+                audit_row.audit_result = "FAILED"
+                db.commit()
+        except Exception:
+            db.rollback()
+    finally:
+        active_audit_tasks.pop(audit_public_id, None)
+        db.close()
 
 
 # =========================================================
@@ -81,10 +121,10 @@ def register_model(payload: RegisterModelRequest, db: Session = Depends(get_db))
 
 @router.get("/models", response_model=List[ModelResponse])
 def list_models(db: Session = Depends(get_db)):
-    models = db.query(AIModel).all()
+    models_list = db.query(AIModel).all()
     response: List[ModelResponse] = []
 
-    for model in models:
+    for model in models_list:
         last_audit = (
             db.query(AuditRun)
             .filter(AuditRun.model_id == model.id)
@@ -96,10 +136,8 @@ def list_models(db: Session = Depends(get_db)):
         last_time = None
         if last_audit:
             last_time = last_audit.executed_at
-            if last_audit.execution_status == "RUNNING":
-                last_status = "RUNNING"
-            elif last_audit.execution_status == "FAILED":
-                last_status = "FAILED"
+            if last_audit.execution_status in ["RUNNING", "FAILED", "PENDING", "CANCELLED"]:
+                last_status = last_audit.execution_status
             else:
                 last_status = last_audit.audit_result
 
@@ -122,48 +160,6 @@ def list_models(db: Session = Depends(get_db)):
 
 
 # =========================================================
-# Background runner (enterprise-safe)
-# =========================================================
-
-def _run_audit_background(model_id: str, audit_public_id: str):
-    db: Session = SessionLocal()
-    try:
-        logger.info(f"Background audit START model_id={model_id} audit_id={audit_public_id}")
-
-        model = db.query(AIModel).filter(AIModel.model_id == model_id).first()
-        if not model:
-            logger.warning(f"Background audit: model not found model_id={model_id}")
-            return
-
-        audit_row = db.query(AuditRun).filter(AuditRun.audit_id == audit_public_id).first()
-        if not audit_row:
-            logger.warning(f"Background audit: audit row not found audit_id={audit_public_id}")
-            return
-
-        policy = db.query(AuditPolicy).filter(AuditPolicy.model_id == model.id).first()
-
-        engine = AuditEngine(db)
-        engine.run_active_audit(model, policy, audit_public_id)
-
-        logger.info(f"Background audit END model_id={model_id} audit_id={audit_public_id}")
-
-    except Exception as exc:
-        logger.exception(f"Background audit failed model_id={model_id} audit_id={audit_public_id}: {exc}")
-
-        try:
-            audit_row = db.query(AuditRun).filter(AuditRun.audit_id == audit_public_id).first()
-            if audit_row:
-                audit_row.execution_status = "FAILED"
-                audit_row.audit_result = "AUDIT_FAIL"
-                db.commit()
-        except Exception:
-            db.rollback()
-
-    finally:
-        db.close()
-
-
-# =========================================================
 # Audits
 # =========================================================
 
@@ -176,6 +172,13 @@ def run_model_audit(
     model = db.query(AIModel).filter(AIModel.model_id == model_id).first()
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
+
+    ongoing = db.query(AuditRun).filter(
+        AuditRun.model_id == model.id, 
+        AuditRun.execution_status == "RUNNING"
+    ).first()
+    if ongoing:
+        raise HTTPException(status_code=400, detail=f"Audit {ongoing.audit_id} is already running.")
 
     evidence = (
         db.query(EvidenceSource)
@@ -195,13 +198,17 @@ def run_model_audit(
         model_id=model.id,
         audit_type="active",
         executed_at=datetime.utcnow(),
-        execution_status="RUNNING",
-        audit_result="RUNNING",
+        execution_status="PENDING",
+        audit_result="PENDING",
     )
     db.add(audit)
     db.commit()
+    db.refresh(audit)
 
-    background_tasks.add_task(_run_audit_background, model_id, audit_public_id)
+    cancel_event = threading.Event()
+    active_audit_tasks[audit_public_id] = cancel_event
+
+    background_tasks.add_task(_run_audit_background, model_id, audit_public_id, cancel_event)
 
     return AuditResponse(
         id=audit.id,
@@ -211,8 +218,37 @@ def run_model_audit(
         executed_at=audit.executed_at,
         execution_status=audit.execution_status,
         audit_result=audit.audit_result,
-        findings_count=0,
+        findings_count=0
     )
+
+
+@router.post("/audits/{audit_id}/stop")
+def stop_audit(audit_id: str, db: Session = Depends(get_db)):
+    """
+    ✅ Robust Stop: Handles 'Zombies' (running in DB but missing from memory)
+    """
+    # 1. Try to signal the active thread
+    event = active_audit_tasks.get(audit_id)
+    if event:
+        event.set()
+        logger.info(f"Signal sent to in-memory task {audit_id}")
+    else:
+        logger.warning(f"Stop requested for {audit_id} but not found in active_audit_tasks. Checking DB...")
+
+    # 2. Force DB update regardless of memory state
+    audit = db.query(AuditRun).filter(AuditRun.audit_id == audit_id).first()
+    if not audit:
+        raise HTTPException(status_code=404, detail="Audit not found in database.")
+
+    if audit.execution_status in ["SUCCESS", "FAILED", "CANCELLED"]:
+        return {"status": "OK", "message": "Audit was already finished.", "state": audit.execution_status}
+
+    # 3. Mark as CANCELLED (Handles the Zombie case)
+    audit.execution_status = "CANCELLED"
+    audit.audit_result = "CANCELLED"
+    db.commit()
+    
+    return {"status": "OK", "message": "Audit marked as CANCELLED."}
 
 
 @router.get("/audits/model/{model_id}/recent")
@@ -232,10 +268,8 @@ def recent_model_audits(model_id: str, db: Session = Depends(get_db)):
     out = []
     for a in audits:
         result = a.audit_result
-        if a.execution_status == "RUNNING":
-            result = "RUNNING"
-        elif a.execution_status == "FAILED":
-            result = "FAILED"
+        if a.execution_status in ["RUNNING", "FAILED", "PENDING", "CANCELLED"]:
+            result = a.execution_status
 
         out.append(
             {
@@ -267,175 +301,77 @@ def get_audit_interactions(audit_id: str, db: Session = Depends(get_db)):
             "prompt_id": r.prompt_id,
             "prompt": r.prompt,
             "response": r.response,
-            "latency_ms": float(getattr(r, "latency", 0.0) or 0.0),
+            "latency_ms": float(r.latency or 0.0),
             "created_at": r.created_at.isoformat() if r.created_at else None,
         }
         for r in rows
     ]
 
 
-@router.get("/audits/{audit_id}/findings")
-def get_audit_findings_with_guidance(audit_id: str, db: Session = Depends(get_db)):
-    audit = db.query(AuditRun).filter(AuditRun.audit_id == audit_id).first()
-    if not audit:
-        raise HTTPException(status_code=404, detail="Audit not found")
-
-    findings = (
-        db.query(AuditFinding)
-        .filter(AuditFinding.audit_id == audit.id)
-        .order_by(AuditFinding.id.asc())
-        .all()
-    )
-
-    results: List[Dict[str, Any]] = []
-    for f in findings:
-        results.append(
-            {
-                "finding_id": f.finding_id,
-                "category": f.category,
-                "severity": f.severity,
-                "metric_name": f.metric_name,
-                "description": f.description,
-                "prompt_id": getattr(f, "prompt_id", None),
-                "interaction_id": getattr(f, "interaction_id", None),
-                "explain": explain_category(f.category),
-                "remediation": remediation_steps(f.category, f.severity, f.metric_name),
-            }
-        )
-
-    return results
-
-
 @router.get("/audits/{audit_id}/findings-grouped")
 def get_audit_grouped_findings(audit_id: str, db: Session = Depends(get_db)):
-    """
-    ✅ Enterprise-safe grouped report builder:
-    - Never crashes due to missing metric score fields
-    - Deduplicates findings
-    - Evidence is limited and does NOT dump full interaction history
-    """
     audit = db.query(AuditRun).filter(AuditRun.audit_id == audit_id).first()
     if not audit:
         raise HTTPException(status_code=404, detail="Audit not found")
 
     model = db.query(AIModel).filter(AIModel.id == audit.model_id).first()
-
-    findings = (
-        db.query(AuditFinding)
-        .filter(AuditFinding.audit_id == audit.id)
-        .order_by(AuditFinding.id.asc())
-        .all()
-    )
-
-    interactions = (
-        db.query(AuditInteraction)
-        .filter(AuditInteraction.audit_id == audit.id)
-        .order_by(AuditInteraction.created_at.asc())
-        .all()
-    )
-
-    metric_rows = (
-        db.query(AuditMetricScore)
-        .filter(AuditMetricScore.audit_id == audit.id)
-        .order_by(AuditMetricScore.id.desc())
-        .all()
-    )
-
-    # ✅ Enterprise-safe metric mapping (getattr fallback)
-    metric_scores_payload: List[Dict[str, Any]] = []
-    for ms in metric_rows:
-        metric_scores_payload.append(
-            {
-                "metric": getattr(ms, "metric_name", None),
-
-                # L/I/R/S
-                "L": float(getattr(ms, "likelihood", 0.0) or 0.0),
-                "I": float(getattr(ms, "impact", 0.0) or 0.0),
-                "R": float(getattr(ms, "regulatory_weight", 0.0) or 0.0),
-                "S": float(getattr(ms, "severity_score", 0.0) or 0.0),
-
-                # 0..100
-                "score_100": float(getattr(ms, "severity_score_100", 0.0) or 0.0),
-
-                # band/weights
-                "band": getattr(ms, "severity_band", None) or "LOW",
-                "w": float(getattr(ms, "strategic_weight", 1.0) or 1.0),
-
-                # optional blocks
-                "frameworks": getattr(ms, "framework_breakdown", None) or {},
-                "signals": getattr(ms, "signals", None) or {},
-                "alpha": float(getattr(ms, "alpha", 1.0) or 1.0),
-                "beta": float(getattr(ms, "beta", 1.5) or 1.5),
-            }
-        )
-
+    findings = db.query(AuditFinding).filter(AuditFinding.audit_id == audit.id).all()
+    interactions = db.query(AuditInteraction).filter(AuditInteraction.audit_id == audit.id).all()
+    metric_rows = db.query(AuditMetricScore).filter(AuditMetricScore.audit_id == audit.id).all()
     summary_row = db.query(AuditSummary).filter(AuditSummary.audit_id == audit.id).first()
 
     global_risk = {}
-    if summary_row and getattr(summary_row, "metrics_snapshot", None):
-        dyn = (summary_row.metrics_snapshot or {}).get("dynamic_scoring") or {}
+    if summary_row:
         global_risk = {
-            "score_100": dyn.get("global_score_100"),
-            "band": dyn.get("global_band"),
+            "score_100": summary_row.risk_score,
+            "band": "N/A"
         }
 
-    audit_payload: Dict[str, Any] = {
+    audit_payload = {
         "audit_id": audit.audit_id,
-        "model_frontend_id": model.model_id if model else None,
-        "model_name": model.name if model else None,
-        "audit_type": audit.audit_type,
-        "executed_at": audit.executed_at.isoformat() if audit.executed_at else None,
+        "model_name": model.name if model else "N/A",
+        "executed_at": audit.executed_at.isoformat(),
         "execution_status": audit.execution_status,
         "audit_result": audit.audit_result,
     }
 
-    findings_payload: List[Dict[str, Any]] = []
-    for f in findings:
-        findings_payload.append(
-            {
-                "finding_id": f.finding_id,
-                "category": f.category,
-                "severity": f.severity,
-                "metric_name": f.metric_name,
-                "description": f.description,
-                "prompt_id": getattr(f, "prompt_id", None),
-                "interaction_id": getattr(f, "interaction_id", None),
-                "explain": explain_category(f.category),
-                "remediation": remediation_steps(f.category, f.severity, f.metric_name),
-            }
-        )
-
-    # ✅ DO NOT dump full interactions into the report (enterprise requirement)
-    # Build only a small indexed set for evidence linkage (report_builder will sample max 3 per issue)
-    interactions_payload: List[Dict[str, Any]] = [
+    findings_payload = [
         {
-            "interaction_id": i.id,
-            "prompt_id": i.prompt_id,
+            "finding_id": f.finding_id,
+            "category": f.category,
+            "severity": f.severity,
+            "metric_name": f.metric_name,
+            "description": f.description,
+            "explain": explain_category(f.category),
+            "remediation": remediation_steps(f.category, f.severity, f.metric_name),
+        }
+        for f in findings
+    ]
+
+    interactions_payload = [
+        {
             "prompt": i.prompt,
             "response": i.response,
-            "latency_ms": float(getattr(i, "latency", 0.0) or 0.0),
-            "created_at": i.created_at.isoformat() if i.created_at else None,
+            "latency_ms": i.latency
         }
         for i in interactions
     ]
 
-    structured_report = build_structured_report(
+    metric_scores_payload = [
+        {
+            "metric": ms.metric_name,
+            "score_100": ms.severity_score_100,
+            "band": ms.severity_band
+        }
+        for ms in metric_rows
+    ]
+
+    return build_structured_report(
         audit=audit_payload,
         findings=findings_payload,
         interactions=interactions_payload,
         metric_scores=metric_scores_payload,
         global_risk=global_risk,
-    )
-
-    return structured_report
-
-
-@router.get("/audits/{audit_id}/download")
-def download_audit_report_json(audit_id: str, db: Session = Depends(get_db)):
-    report = get_audit_grouped_findings(audit_id=audit_id, db=db)
-    return JSONResponse(
-        content=report,
-        headers={"Content-Disposition": f'attachment; filename="audit_{audit_id}.json"'},
     )
 
 
